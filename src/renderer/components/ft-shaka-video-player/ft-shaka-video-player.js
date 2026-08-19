@@ -497,9 +497,10 @@ export default defineComponent({
         }
         lastCaptureTime = now
 
-        // The PiP window is small; capping the buffer keeps drawImage
-        // and the frame relay cheap
-        const scale = Math.min(1, 432 / videoWidth)
+        // Match the actual PiP window resolution (pushed by the native
+        // side) so no sharpness is wasted or lost; bounded for cost.
+        const targetWidth = Math.min(720, Math.max(320, window.__ftPipTargetWidth || 480))
+        const scale = Math.min(1, targetWidth / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
         if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
@@ -556,7 +557,7 @@ export default defineComponent({
                 relayBusy = false
               }
               reader.readAsDataURL(blob)
-            }, 'image/jpeg', 0.45)
+            }, 'image/jpeg', 0.65)
           } catch {
             // tainted canvas; the in-page mirror keeps running
             relayBusy = false

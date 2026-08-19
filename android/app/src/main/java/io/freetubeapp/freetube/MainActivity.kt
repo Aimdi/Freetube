@@ -114,6 +114,13 @@ class MainActivity: FreeTubeActivity() {
           ViewGroup.LayoutParams.MATCH_PARENT
         )
         isOpaque = true
+        // Tell the page the real PiP resolution so relayed frames are
+        // exactly as sharp as the window can display.
+        addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
+          if (isInPictureInPictureMode && view.width > 0) {
+            webView.evaluateJavascript("window.__ftPipTargetWidth = ${view.width}", null)
+          }
+        }
       }
       pipStatus = TextView(this@MainActivity).apply {
         layoutParams = FrameLayout.LayoutParams(
@@ -221,6 +228,9 @@ class MainActivity: FreeTubeActivity() {
       pipStatus.visibility = View.VISIBLE
       pipOverlay.visibility = View.VISIBLE
       pipOverlay.bringToFront()
+      if (pipTexture.width > 0) {
+        webView.evaluateJavascript("window.__ftPipTargetWidth = ${pipTexture.width}", null)
+      }
       mainHandler.removeCallbacks(pipCaptureClock)
       mainHandler.post(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
