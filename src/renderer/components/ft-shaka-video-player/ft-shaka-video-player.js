@@ -400,8 +400,12 @@ export default defineComponent({
       let stopped = false
       let vfcHandle = null
       let rafHandle = null
+      let lastRelayTime = 0
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
+      const canRelayFrames = typeof android.sendPipFrame === 'function'
+
+      window.__ftPipMirrorActive = true
 
       const paintFrame = () => {
         const videoWidth = videoEl.videoWidth
@@ -409,8 +413,9 @@ export default defineComponent({
         if (videoWidth <= 0 || videoHeight <= 0) {
           return
         }
-        // The PiP window is small; capping the buffer keeps drawImage cheap
-        const scale = Math.min(1, 854 / videoWidth)
+        // The PiP window is small; capping the buffer keeps drawImage
+        // and the JPEG relay cheap
+        const scale = Math.min(1, 640 / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
         if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
@@ -434,6 +439,22 @@ export default defineComponent({
         ctx.font = `${fontSize}px sans-serif`
         ctx.fillStyle = 'rgba(255, 255, 255, 0.75)'
         ctx.fillText(`${minutes}:${seconds}`, 10, canvasHeight - 10)
+
+        // Relay the frame to a native ImageView. The WebView's own surface
+        // may not be composited into the PiP window at all, but native
+        // views always are. MSE-fed video never taints the canvas, and the
+        // legacy <video> uses crossorigin="anonymous", so toDataURL works.
+        if (canRelayFrames) {
+          const now = Date.now()
+          if (now - lastRelayTime >= 90) {
+            lastRelayTime = now
+            try {
+              android.sendPipFrame(canvas.toDataURL('image/jpeg', 0.6))
+            } catch {
+              // tainted canvas; the in-page mirror keeps running
+            }
+          }
+        }
       }
 
       const drawLoop = () => {
@@ -467,6 +488,7 @@ export default defineComponent({
 
       pipMirrorStop = () => {
         stopped = true
+        window.__ftPipMirrorActive = false
         clearInterval(redrawInterval)
         if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
           videoEl.cancelVideoFrameCallback(vfcHandle)

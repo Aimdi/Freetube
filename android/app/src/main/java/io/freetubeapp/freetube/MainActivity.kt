@@ -2,10 +2,20 @@ package io.freetubeapp.freetube
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.TextView
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
@@ -21,7 +31,34 @@ class MainActivity: FreeTubeActivity() {
       return Intent(this, KeepAliveService::class.java)
     }
   private lateinit var webView: FreeTubeWebView
+  private lateinit var pipOverlay: FrameLayout
+  private lateinit var pipImage: ImageView
+  private lateinit var pipStatus: TextView
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private var lastPipFrameAt = 0L
   private var pipEnterInProgress = false
+
+  private val pipStatusPoller = object : Runnable {
+    override fun run() {
+      if (!isInPictureInPictureMode) {
+        return
+      }
+      // Only surface diagnostics when no frames are arriving
+      if (SystemClock.elapsedRealtime() - lastPipFrameAt > 2000) {
+        webView.evaluateJavascript(
+          "(function(){try{var v=document.querySelector('video.player');" +
+            "return 'video:'+(v?1:0)+' size:'+(v?v.videoWidth+'x'+v.videoHeight:'-')+" +
+            "' time:'+(v?Math.round(v.currentTime):'-')+' mirror:'+(window.__ftPipMirrorActive?1:0)+" +
+            "' pip:'+(document.documentElement.classList.contains('androidPip')?1:0)}" +
+            "catch(e){return 'err: '+e.message}})()"
+        ) { result ->
+          pipStatus.text = "waiting for frames\n${result?.trim('"') ?: "no response"}"
+          pipStatus.visibility = View.VISIBLE
+        }
+      }
+      mainHandler.postDelayed(this, 1000)
+    }
+  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -48,6 +85,41 @@ class MainActivity: FreeTubeActivity() {
         }
       }
       root.addView(webView)
+
+      // Native PiP surface: system PiP always composites native views,
+      // even when the WebView's own surface goes missing or black.
+      pipImage = ImageView(this@MainActivity).apply {
+        layoutParams = FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        scaleType = ImageView.ScaleType.FIT_CENTER
+        setBackgroundColor(Color.BLACK)
+      }
+      pipStatus = TextView(this@MainActivity).apply {
+        layoutParams = FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.WRAP_CONTENT,
+          Gravity.BOTTOM
+        )
+        setTextColor(Color.WHITE)
+        textSize = 10f
+        setBackgroundColor(0x88000000.toInt())
+        setPadding(12, 6, 12, 6)
+        visibility = View.GONE
+      }
+      pipOverlay = FrameLayout(this@MainActivity).apply {
+        layoutParams = ViewGroup.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        setBackgroundColor(Color.BLACK)
+        visibility = View.GONE
+        isClickable = false
+        addView(pipImage)
+        addView(pipStatus)
+      }
+      root.addView(pipOverlay)
     }
 
     // this keeps android from shutting off the app to conserve battery
@@ -125,12 +197,36 @@ class MainActivity: FreeTubeActivity() {
       webView.setBackgroundColor(Color.BLACK)
       cropPlayerForPictureInPicture()
       webView.dispatchEvent("pip-enter")
+      lastPipFrameAt = 0L
+      pipImage.setImageDrawable(null)
+      pipStatus.text = "waiting for frames…"
+      pipStatus.visibility = View.VISIBLE
+      pipOverlay.visibility = View.VISIBLE
+      pipOverlay.bringToFront()
+      mainHandler.removeCallbacks(pipStatusPoller)
+      mainHandler.postDelayed(pipStatusPoller, 1000)
     } else {
+      mainHandler.removeCallbacks(pipStatusPoller)
+      pipOverlay.visibility = View.GONE
+      pipImage.setImageDrawable(null)
+      pipStatus.visibility = View.GONE
       webView.setAndroidPipMode(false)
       webView.setBackgroundColor(Color.TRANSPARENT)
       webView.dispatchEvent("pip-exit")
       if (state.paused) {
         webView.dispatchEvent("app-pause")
+      }
+    }
+  }
+
+  fun onPipFrame(bitmap: Bitmap) {
+    runOnUiThread {
+      lastPipFrameAt = SystemClock.elapsedRealtime()
+      if (isInPictureInPictureMode) {
+        pipImage.setImageBitmap(bitmap)
+        if (pipStatus.visibility == View.VISIBLE) {
+          pipStatus.visibility = View.GONE
+        }
       }
     }
   }

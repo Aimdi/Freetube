@@ -460,6 +460,26 @@ class FreeTubeJavaScriptInterface(
     return context.state.isInPictureInPicture
   }
 
+  /**
+   * Receives a JPEG data-URL of the current video frame while in PiP.
+   * The WebView surface is not reliably composited into the system PiP
+   * window, but native views are, so frames are shown in an ImageView.
+   */
+  @JavascriptInterface
+  fun sendPipFrame(dataUrl: String) {
+    val comma = dataUrl.indexOf(',')
+    if (comma < 0) {
+      return
+    }
+    try {
+      val bytes = android.util.Base64.decode(dataUrl.substring(comma + 1), android.util.Base64.DEFAULT)
+      val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+      (context as? MainActivity)?.onPipFrame(bitmap)
+    } catch (_: Exception) {
+      // corrupt frame; the next one will arrive shortly
+    }
+  }
+
   // endregion
 
   // region Data Extraction
