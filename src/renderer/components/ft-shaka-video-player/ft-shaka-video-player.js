@@ -401,9 +401,15 @@ export default defineComponent({
       let vfcHandle = null
       let rafHandle = null
       let lastRelayTime = 0
+      // Adaptive pacing: aim for ~30fps, back off when encoding is slow
+      let relayIntervalMs = 33
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
       const canRelayFrames = typeof android.sendPipFrame === 'function'
+      // WebP encodes faster and smaller than JPEG in Chromium
+      const relayFormat = canvas.toDataURL('image/webp', 0.5).startsWith('data:image/webp')
+        ? 'image/webp'
+        : 'image/jpeg'
 
       window.__ftPipMirrorActive = true
 
@@ -414,44 +420,38 @@ export default defineComponent({
           return
         }
         // The PiP window is small; capping the buffer keeps drawImage
-        // and the JPEG relay cheap
-        const scale = Math.min(1, 640 / videoWidth)
+        // and the frame relay cheap
+        const scale = Math.min(1, 540 / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
         if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
           canvas.width = canvasWidth
           canvas.height = canvasHeight
         }
-        // Dark background instead of pure black so a failed drawImage is
-        // distinguishable from a dead canvas.
-        ctx.fillStyle = '#181818'
-        ctx.fillRect(0, 0, canvasWidth, canvasHeight)
         try {
           ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
         } catch {
           // ignore decoder hiccups; next frame will draw
         }
-        // Progress indicator (also proves the canvas is alive in PiP)
-        const time = videoEl.currentTime || 0
-        const minutes = Math.floor(time / 60)
-        const seconds = Math.floor(time % 60).toString().padStart(2, '0')
-        const fontSize = Math.max(12, Math.round(canvasHeight * 0.05))
-        ctx.font = `${fontSize}px sans-serif`
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.75)'
-        ctx.fillText(`${minutes}:${seconds}`, 10, canvasHeight - 10)
 
         // Relay the frame to a native ImageView. The WebView's own surface
-        // may not be composited into the PiP window at all, but native
+        // is not composited into the PiP window on all devices, but native
         // views always are. MSE-fed video never taints the canvas, and the
         // legacy <video> uses crossorigin="anonymous", so toDataURL works.
         if (canRelayFrames) {
-          const now = Date.now()
-          if (now - lastRelayTime >= 90) {
+          const now = performance.now()
+          if (now - lastRelayTime >= relayIntervalMs) {
             lastRelayTime = now
             try {
-              android.sendPipFrame(canvas.toDataURL('image/jpeg', 0.6))
+              android.sendPipFrame(canvas.toDataURL(relayFormat, 0.5))
             } catch {
               // tainted canvas; the in-page mirror keeps running
+            }
+            const encodeMs = performance.now() - now
+            if (encodeMs > 24) {
+              relayIntervalMs = Math.min(100, relayIntervalMs + 8)
+            } else if (relayIntervalMs > 33) {
+              relayIntervalMs = Math.max(33, relayIntervalMs - 4)
             }
           }
         }

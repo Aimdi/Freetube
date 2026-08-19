@@ -460,8 +460,13 @@ class FreeTubeJavaScriptInterface(
     return context.state.isInPictureInPicture
   }
 
+  // Rotating pool so ~30fps decoding reuses pixel buffers instead of
+  // allocating a new bitmap per frame (avoids constant GC pauses).
+  private val pipFramePool = arrayOfNulls<android.graphics.Bitmap>(3)
+  private var pipFramePoolIndex = 0
+
   /**
-   * Receives a JPEG data-URL of the current video frame while in PiP.
+   * Receives a WebP/JPEG data-URL of the current video frame while in PiP.
    * The WebView surface is not reliably composited into the system PiP
    * window, but native views are, so frames are shown in an ImageView.
    */
@@ -473,7 +478,18 @@ class FreeTubeJavaScriptInterface(
     }
     try {
       val bytes = android.util.Base64.decode(dataUrl.substring(comma + 1), android.util.Base64.DEFAULT)
-      val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+      val options = android.graphics.BitmapFactory.Options()
+      options.inMutable = true
+      options.inBitmap = pipFramePool[pipFramePoolIndex]
+      val bitmap = try {
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+      } catch (_: IllegalArgumentException) {
+        // reuse failed (frame size changed); decode fresh
+        options.inBitmap = null
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+      } ?: return
+      pipFramePool[pipFramePoolIndex] = bitmap
+      pipFramePoolIndex = (pipFramePoolIndex + 1) % pipFramePool.size
       (context as? MainActivity)?.onPipFrame(bitmap)
     } catch (_: Exception) {
       // corrupt frame; the next one will arrive shortly
