@@ -472,6 +472,7 @@ class FreeTubeJavaScriptInterface(
   */
   private val pipFrameLock = Object()
   private var pipFramePending: String? = null
+  private var pipFrameCaptureId = 0.0
   private var pipFrameDecoderStarted = false
   // Rotating pool so ~30fps decoding reuses pixel buffers instead of
   // allocating a new bitmap per frame (avoids constant GC pauses).
@@ -479,14 +480,17 @@ class FreeTubeJavaScriptInterface(
   private var pipFramePoolIndex = 0
 
   /**
-   * Receives a WebP/JPEG data-URL of the current video frame while in PiP.
+   * Receives a JPEG data-URL of the current video frame while in PiP.
    * The WebView surface is not reliably composited into the system PiP
-   * window, but native views are, so frames are shown in an ImageView.
+   * window, but native views are, so frames go to a TextureView.
+   * @param captureId JS timestamp echoed back after the draw so the page
+   * can measure true end-to-end latency
    */
   @JavascriptInterface
-  fun sendPipFrame(dataUrl: String) {
+  fun sendPipFrame(dataUrl: String, captureId: Double) {
     synchronized(pipFrameLock) {
       pipFramePending = dataUrl
+      pipFrameCaptureId = captureId
       if (!pipFrameDecoderStarted) {
         pipFrameDecoderStarted = true
         thread(isDaemon = true, name = "pip-frame-decoder") { pipFrameDecodeLoop() }
@@ -497,19 +501,21 @@ class FreeTubeJavaScriptInterface(
 
   private fun pipFrameDecodeLoop() {
     while (true) {
+      var captureId = 0.0
       val dataUrl = synchronized(pipFrameLock) {
         while (pipFramePending == null) {
           pipFrameLock.wait()
         }
         val pending = pipFramePending!!
+        captureId = pipFrameCaptureId
         pipFramePending = null
         pending
       }
-      decodePipFrame(dataUrl)
+      decodePipFrame(dataUrl, captureId)
     }
   }
 
-  private fun decodePipFrame(dataUrl: String) {
+  private fun decodePipFrame(dataUrl: String, captureId: Double) {
     val comma = dataUrl.indexOf(',')
     if (comma < 0) {
       return
@@ -528,7 +534,7 @@ class FreeTubeJavaScriptInterface(
       } ?: return
       pipFramePool[pipFramePoolIndex] = bitmap
       pipFramePoolIndex = (pipFramePoolIndex + 1) % pipFramePool.size
-      (context as? MainActivity)?.onPipFrame(bitmap)
+      (context as? MainActivity)?.onPipFrame(bitmap, captureId)
     } catch (_: Exception) {
       // corrupt frame; the next one will arrive shortly
     }

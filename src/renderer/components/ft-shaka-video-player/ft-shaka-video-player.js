@@ -393,7 +393,9 @@ export default defineComponent({
     let pipAudioContext = null
     /** @type {DelayNode|null} */
     let pipAudioDelay = null
-    let pipFrameLatencyMs = 70
+    // True end-to-end latency (capture -> drawn on the native surface),
+    // measured through per-frame acks from the native side.
+    let pipFrameLatencyMs = 120
 
     async function enableAndroidPipAudioSync() {
       const videoEl = video.value
@@ -426,8 +428,8 @@ export default defineComponent({
       if (!pipAudioContext || !pipAudioDelay) {
         return
       }
-      // measured in-page latency + native decode/draw and display latency
-      const target = Math.min(0.35, Math.max(0.05, (pipFrameLatencyMs + 55) / 1000))
+      // measured end-to-end latency + display/vsync margin
+      const target = Math.min(0.4, Math.max(0.05, (pipFrameLatencyMs + 20) / 1000))
       try {
         pipAudioDelay.delayTime.setTargetAtTime(target, pipAudioContext.currentTime, 0.1)
       } catch {
@@ -477,12 +479,44 @@ export default defineComponent({
       let vfcHandle = null
       let relayBusy = false
       let lastCaptureTime = 0
-      let relayedFrameCount = 0
+      let ackCount = 0
+      // Closed-loop controller state: starts conservative and adapts to
+      // whatever this device can actually sustain.
+      let relayQuality = 0.5
+      let relayResolutionScale = 0.8
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
       const canRelayFrames = typeof android.sendPipFrame === 'function'
 
       window.__ftPipMirrorActive = true
+
+      /*
+        Per-frame ack from the native side after the frame is actually
+        drawn. Gives the TRUE end-to-end latency, which drives both the
+        audio delay line and the quality/resolution controller:
+        overloaded -> smaller/cheaper frames; headroom -> sharper frames.
+      */
+      window.__ftPipFrameShown = (sentAt) => {
+        if (stopped || typeof sentAt !== 'number') {
+          return
+        }
+        const sample = performance.now() - sentAt
+        if (sample <= 0 || sample > 2000) {
+          return
+        }
+        pipFrameLatencyMs = pipFrameLatencyMs * 0.8 + sample * 0.2
+        ackCount++
+        if (ackCount % 15 === 0) {
+          if (pipFrameLatencyMs > 110) {
+            relayQuality = Math.max(0.4, relayQuality - 0.05)
+            relayResolutionScale = Math.max(0.6, relayResolutionScale - 0.1)
+          } else if (pipFrameLatencyMs < 60) {
+            relayQuality = Math.min(0.7, relayQuality + 0.05)
+            relayResolutionScale = Math.min(1, relayResolutionScale + 0.05)
+          }
+          updateAndroidPipAudioDelay()
+        }
+      }
 
       const paintFrame = () => {
         const videoWidth = videoEl.videoWidth
@@ -497,9 +531,10 @@ export default defineComponent({
         }
         lastCaptureTime = now
 
-        // Match the actual PiP window resolution (pushed by the native
-        // side) so no sharpness is wasted or lost; bounded for cost.
-        const targetWidth = Math.min(720, Math.max(320, window.__ftPipTargetWidth || 480))
+        // Base target: the PiP window's real width (pushed by the native
+        // side), scaled down by the controller when the device is slow.
+        const windowWidth = Math.min(600, Math.max(320, window.__ftPipTargetWidth || 480))
+        const targetWidth = Math.max(280, Math.round(windowWidth * relayResolutionScale))
         const scale = Math.min(1, targetWidth / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
@@ -515,16 +550,15 @@ export default defineComponent({
         }
 
         /*
-          Relay the frame to a native ImageView. The WebView's own surface
-          is not composited into the PiP window on all devices, but native
-          views always are.
+          Relay the frame to the native TextureView. The WebView's own
+          surface is not composited into the PiP window on all devices,
+          but native views always are.
 
-          toBlob encodes asynchronously off the main thread (unlike
-          toDataURL, whose synchronous encode stalled this very capture
-          loop and made PiP lag). Strictly one frame in flight — when
-          encoding can't keep up, frames are dropped, never queued, so
-          the PiP image stays in real time. MSE-fed video never taints
-          the canvas and the legacy <video> uses crossorigin="anonymous".
+          toBlob encodes asynchronously off the main thread. Strictly one
+          frame in flight — when encoding can't keep up, frames are
+          dropped, never queued, so the PiP image stays in real time.
+          MSE-fed video never taints the canvas and the legacy <video>
+          uses crossorigin="anonymous".
         */
         if (canRelayFrames && !relayBusy) {
           relayBusy = true
@@ -540,16 +574,9 @@ export default defineComponent({
                 relayBusy = false
                 if (!stopped && typeof reader.result === 'string') {
                   try {
-                    android.sendPipFrame(reader.result)
+                    android.sendPipFrame(reader.result, captureStart)
                   } catch {
                     // bridge hiccup; next frame will arrive shortly
-                  }
-                  // Smoothed in-page latency for the audio delay line
-                  const sampled = performance.now() - captureStart
-                  pipFrameLatencyMs = pipFrameLatencyMs * 0.85 + sampled * 0.15
-                  relayedFrameCount++
-                  if (relayedFrameCount % 30 === 0) {
-                    updateAndroidPipAudioDelay()
                   }
                 }
               }
@@ -557,7 +584,7 @@ export default defineComponent({
                 relayBusy = false
               }
               reader.readAsDataURL(blob)
-            }, 'image/jpeg', 0.65)
+            }, 'image/jpeg', relayQuality)
           } catch {
             // tainted canvas; the in-page mirror keeps running
             relayBusy = false
@@ -605,6 +632,7 @@ export default defineComponent({
         stopped = true
         window.__ftPipMirrorActive = false
         delete window.__ftPipCapture
+        delete window.__ftPipFrameShown
         clearInterval(captureInterval)
         if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
           videoEl.cancelVideoFrameCallback(vfcHandle)

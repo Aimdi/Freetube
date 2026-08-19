@@ -56,6 +56,12 @@ class MainActivity: FreeTubeActivity() {
     }
   }
 
+  private val pipSizeNotifier = Runnable {
+    if (isInPictureInPictureMode && pipTexture.width > 0) {
+      webView.evaluateJavascript("window.__ftPipTargetWidth = ${pipTexture.width}", null)
+    }
+  }
+
   private val pipStatusPoller = object : Runnable {
     override fun run() {
       if (!isInPictureInPictureMode) {
@@ -115,10 +121,12 @@ class MainActivity: FreeTubeActivity() {
         )
         isOpaque = true
         // Tell the page the real PiP resolution so relayed frames are
-        // exactly as sharp as the window can display.
-        addOnLayoutChangeListener { view, _, _, _, _, _, _, _, _ ->
-          if (isInPictureInPictureMode && view.width > 0) {
-            webView.evaluateJavascript("window.__ftPipTargetWidth = ${view.width}", null)
+        // exactly as sharp as the window can display. Debounced so the
+        // resize animation doesn't spam changing sizes.
+        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+          if (isInPictureInPictureMode) {
+            mainHandler.removeCallbacks(pipSizeNotifier)
+            mainHandler.postDelayed(pipSizeNotifier, 250)
           }
         }
       }
@@ -228,9 +236,9 @@ class MainActivity: FreeTubeActivity() {
       pipStatus.visibility = View.VISIBLE
       pipOverlay.visibility = View.VISIBLE
       pipOverlay.bringToFront()
-      if (pipTexture.width > 0) {
-        webView.evaluateJavascript("window.__ftPipTargetWidth = ${pipTexture.width}", null)
-      }
+      // push the settled window size once the enter animation finishes
+      mainHandler.removeCallbacks(pipSizeNotifier)
+      mainHandler.postDelayed(pipSizeNotifier, 400)
       mainHandler.removeCallbacks(pipCaptureClock)
       mainHandler.post(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
@@ -238,6 +246,7 @@ class MainActivity: FreeTubeActivity() {
     } else {
       mainHandler.removeCallbacks(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
+      mainHandler.removeCallbacks(pipSizeNotifier)
       pipOverlay.visibility = View.GONE
       pipStatus.visibility = View.GONE
       webView.setAndroidPipMode(false)
@@ -251,9 +260,10 @@ class MainActivity: FreeTubeActivity() {
 
   /**
    * Called from the frame-decoder thread. Draws straight onto the
-   * TextureView surface so no per-frame work queues on the UI thread.
+   * TextureView surface so no per-frame work queues on the UI thread,
+   * then acks the frame so the page can measure end-to-end latency.
    */
-  fun onPipFrame(bitmap: Bitmap) {
+  fun onPipFrame(bitmap: Bitmap, captureId: Double) {
     lastPipFrameAt = SystemClock.elapsedRealtime()
     if (!isInPictureInPictureMode || !pipTexture.isAvailable) {
       return
@@ -284,11 +294,15 @@ class MainActivity: FreeTubeActivity() {
         // surface went away mid-draw (PiP dismissed)
       }
     }
-    if (pipStatus.visibility == View.VISIBLE) {
-      runOnUiThread {
-        if (SystemClock.elapsedRealtime() - lastPipFrameAt < 2000) {
-          pipStatus.visibility = View.GONE
-        }
+    mainHandler.post {
+      webView.evaluateJavascript(
+        "window.__ftPipFrameShown && window.__ftPipFrameShown($captureId)",
+        null
+      )
+      if (pipStatus.visibility == View.VISIBLE &&
+        SystemClock.elapsedRealtime() - lastPipFrameAt < 2000
+      ) {
+        pipStatus.visibility = View.GONE
       }
     }
   }
