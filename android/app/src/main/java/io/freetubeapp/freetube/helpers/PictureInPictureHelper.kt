@@ -61,7 +61,8 @@ object PictureInPictureHelper {
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       builder.setAutoEnterEnabled(autoEnter)
-      builder.setSeamlessResizeEnabled(true)
+      // Video surfaces must not crossfade; true freezes the overlay hole.
+      builder.setSeamlessResizeEnabled(false)
     }
 
     return builder.build()
@@ -113,11 +114,6 @@ object PictureInPictureHelper {
           '  min-height: 0 !important;',
           '  background: #000 !important;',
           '}',
-          'html.androidPip body * { visibility: hidden !important; }',
-          'html.androidPip .ftVideoPlayer,',
-          'html.androidPip .ftVideoPlayer *,',
-          'html.androidPip video.player,',
-          'html.androidPip video { visibility: visible !important; }',
           'html.androidPip .topNav,',
           'html.androidPip .sideNav,',
           'html.androidPip .sideNavMoreOptions,',
