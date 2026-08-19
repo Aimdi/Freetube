@@ -9,6 +9,7 @@ import androidx.documentfile.provider.DocumentFile
 import io.freetubeapp.freetube.MainActivity
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.helpers.MediaSessionFacade
+import io.freetubeapp.freetube.helpers.PipStreamBuffer
 import io.freetubeapp.freetube.helpers.Promise
 import io.freetubeapp.freetube.helpers.WriteMode
 import io.freetubeapp.freetube.helpers.getDataDirectory
@@ -478,6 +479,33 @@ class FreeTubeJavaScriptInterface(
   // allocating a new bitmap per frame (avoids constant GC pauses).
   private val pipFramePool = arrayOfNulls<android.graphics.Bitmap>(3)
   private var pipFramePoolIndex = 0
+
+  /**
+   * The page hardware-encodes the playing audio+video with MediaRecorder
+   * and streams the container here; a native ExoPlayer plays it in the
+   * PiP window with proper frame pacing and built-in A/V sync.
+   */
+  @JavascriptInterface
+  fun sendPipStreamStart(mimeType: String) {
+    context.runOnUiThread {
+      (context as? MainActivity)?.onPipStreamStart(mimeType)
+    }
+  }
+
+  @JavascriptInterface
+  fun sendPipStreamChunk(base64Data: String) {
+    try {
+      PipStreamBuffer.append(android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT))
+      (context as? MainActivity)?.onPipStreamData()
+    } catch (_: Exception) {
+      // corrupt chunk; the extractor will resync or error out to fallback
+    }
+  }
+
+  @JavascriptInterface
+  fun sendPipStreamEnd() {
+    PipStreamBuffer.close()
+  }
 
   /**
    * Receives a JPEG data-URL of the current video frame while in PiP.

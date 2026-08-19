@@ -18,9 +18,18 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
+import io.freetubeapp.freetube.helpers.PipStreamBuffer
+import io.freetubeapp.freetube.helpers.PipStreamDataSource
 import io.freetubeapp.freetube.helpers.isDarkMode
 import io.freetubeapp.freetube.helpers.toYtUrl
 import io.freetubeapp.freetube.helpers.urlEncode
@@ -35,11 +44,13 @@ class MainActivity: FreeTubeActivity() {
   private lateinit var webView: FreeTubeWebView
   private lateinit var pipOverlay: FrameLayout
   private lateinit var pipTexture: TextureView
+  private lateinit var pipStreamTexture: TextureView
   private lateinit var pipStatus: TextView
   private val mainHandler = Handler(Looper.getMainLooper())
   private val pipFramePaint = Paint(Paint.FILTER_BITMAP_FLAG)
   private var lastPipFrameAt = 0L
   private var pipEnterInProgress = false
+  private var pipStreamPlayer: ExoPlayer? = null
 
   /**
    * Ticks the in-page capture from the native side. Renderer timers are
@@ -142,6 +153,15 @@ class MainActivity: FreeTubeActivity() {
         setPadding(12, 6, 12, 6)
         visibility = View.GONE
       }
+      // ExoPlayer sink for the MediaRecorder stream. Sits under the
+      // frame-relay texture; revealed once the stream renders.
+      pipStreamTexture = TextureView(this@MainActivity).apply {
+        layoutParams = FrameLayout.LayoutParams(
+          ViewGroup.LayoutParams.MATCH_PARENT,
+          ViewGroup.LayoutParams.MATCH_PARENT
+        )
+        isOpaque = true
+      }
       pipOverlay = FrameLayout(this@MainActivity).apply {
         layoutParams = ViewGroup.LayoutParams(
           ViewGroup.LayoutParams.MATCH_PARENT,
@@ -150,6 +170,7 @@ class MainActivity: FreeTubeActivity() {
         setBackgroundColor(Color.BLACK)
         visibility = View.GONE
         isClickable = false
+        addView(pipStreamTexture)
         addView(pipTexture)
         addView(pipStatus)
       }
@@ -234,6 +255,7 @@ class MainActivity: FreeTubeActivity() {
       lastPipFrameAt = 0L
       pipStatus.text = "waiting for frames…"
       pipStatus.visibility = View.VISIBLE
+      pipTexture.visibility = View.VISIBLE
       pipOverlay.visibility = View.VISIBLE
       pipOverlay.bringToFront()
       // push the settled window size once the enter animation finishes
@@ -247,6 +269,7 @@ class MainActivity: FreeTubeActivity() {
       mainHandler.removeCallbacks(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
       mainHandler.removeCallbacks(pipSizeNotifier)
+      stopPipStreamPlayer()
       pipOverlay.visibility = View.GONE
       pipStatus.visibility = View.GONE
       webView.setAndroidPipMode(false)
@@ -256,6 +279,58 @@ class MainActivity: FreeTubeActivity() {
         webView.dispatchEvent("app-pause")
       }
     }
+  }
+
+  /**
+   * The page's MediaRecorder started streaming; play it natively.
+   * Real video pipeline: hardware decode, proper frame pacing, and
+   * A/V sync from the container timestamps.
+   */
+  fun onPipStreamStart(@Suppress("UNUSED_PARAMETER") mimeType: String) {
+    stopPipStreamPlayer()
+    PipStreamBuffer.reset()
+    val dataSourceFactory = DataSource.Factory { PipStreamDataSource() }
+    val player = ExoPlayer.Builder(this)
+      .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+      .setLoadControl(
+        DefaultLoadControl.Builder()
+          .setBufferDurationsMs(500, 10_000, 250, 500)
+          .build()
+      )
+      .build()
+    player.setVideoTextureView(pipStreamTexture)
+    player.addListener(object : Player.Listener {
+      override fun onRenderedFirstFrame() {
+        lastPipFrameAt = SystemClock.elapsedRealtime()
+        pipStreamTexture.visibility = View.VISIBLE
+        // reveal the stream; stop the JPEG frame relay
+        pipTexture.visibility = View.INVISIBLE
+        pipStatus.visibility = View.GONE
+        webView.evaluateJavascript("window.__ftPipStreamRendering && window.__ftPipStreamRendering()", null)
+      }
+
+      override fun onPlayerError(error: PlaybackException) {
+        stopPipStreamPlayer()
+        webView.evaluateJavascript("window.__ftPipStreamFailed && window.__ftPipStreamFailed()", null)
+      }
+    })
+    player.setMediaItem(MediaItem.fromUri("pipstream://live"))
+    player.prepare()
+    player.playWhenReady = true
+    pipStreamPlayer = player
+  }
+
+  /** chunk heartbeat for the diagnostics poller */
+  fun onPipStreamData() {
+    lastPipFrameAt = SystemClock.elapsedRealtime()
+  }
+
+  private fun stopPipStreamPlayer() {
+    PipStreamBuffer.close()
+    pipStreamPlayer?.release()
+    pipStreamPlayer = null
+    pipStreamTexture.visibility = View.INVISIBLE
+    pipTexture.visibility = View.VISIBLE
   }
 
   /**
@@ -388,6 +463,7 @@ class MainActivity: FreeTubeActivity() {
   }
 
   override fun onDestroy() {
+    stopPipStreamPlayer()
     // stop the keep alive service
     stopService(keepGoingService)
     // cancel media notification (if there is one)

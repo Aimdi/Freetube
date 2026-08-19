@@ -393,6 +393,10 @@ export default defineComponent({
     let pipAudioContext = null
     /** @type {DelayNode|null} */
     let pipAudioDelay = null
+    /** @type {MediaElementAudioSourceNode|null} */
+    let pipAudioSourceNode = null
+    /** @type {GainNode|null} */
+    let pipAudioGain = null
     // True end-to-end latency (capture -> drawn on the native surface),
     // measured through per-frame acks from the native side.
     let pipFrameLatencyMs = 120
@@ -412,15 +416,35 @@ export default defineComponent({
           }
           const delayNode = ctx.createDelay(1.0)
           delayNode.delayTime.value = 0
+          const gainNode = ctx.createGain()
+          gainNode.gain.value = 1
           const source = ctx.createMediaElementSource(videoEl)
           source.connect(delayNode)
-          delayNode.connect(ctx.destination)
+          delayNode.connect(gainNode)
+          gainNode.connect(ctx.destination)
           pipAudioContext = ctx
           pipAudioDelay = delayNode
+          pipAudioSourceNode = source
+          pipAudioGain = gainNode
         }
         updateAndroidPipAudioDelay()
       } catch {
         // audio keeps playing directly; sync stays as-is
+      }
+    }
+
+    /**
+     * Mutes the speaker route while native stream playback carries the
+     * audio, without muting the element (that would silence the capture).
+     * @param {boolean} muted
+     */
+    function setPipSpeakersMuted(muted) {
+      if (pipAudioContext && pipAudioGain) {
+        try {
+          pipAudioGain.gain.setTargetAtTime(muted ? 0 : 1, pipAudioContext.currentTime, 0.03)
+        } catch {
+          // keep current routing
+        }
       }
     }
 
@@ -456,8 +480,152 @@ export default defineComponent({
         }
         pipAudioContext = null
         pipAudioDelay = null
+        pipAudioSourceNode = null
+        pipAudioGain = null
       }
     }
+
+    // #region android pip media stream
+
+    /*
+      Preferred PiP path: hardware-encode the playing audio+video with
+      MediaRecorder and hand the container stream to a native ExoPlayer.
+      Real video pipeline on both ends: smooth frame pacing and perfect
+      A/V sync from container timestamps. Runs ~0.5-1s behind live,
+      which is invisible inside a PiP window. The JPEG frame relay keeps
+      covering the window until the stream renders, and remains the
+      fallback if recording is unsupported or fails.
+    */
+    /** @type {MediaRecorder|null} */
+    let pipStreamRecorder = null
+    /** @type {MediaStreamAudioDestinationNode|null} */
+    let pipStreamAudioDest = null
+
+    function startAndroidPipStream() {
+      if (
+        pipStreamRecorder ||
+        props.format === 'audio' ||
+        typeof MediaRecorder === 'undefined' ||
+        typeof android.sendPipStreamStart !== 'function' ||
+        // audio must come through the Web Audio graph, otherwise the
+        // speakers and the native player would both play sound
+        !pipAudioContext || !pipAudioSourceNode
+      ) {
+        return
+      }
+      const videoEl = video.value
+      if (!videoEl || typeof videoEl.captureStream !== 'function') {
+        return
+      }
+      try {
+        const captured = videoEl.captureStream()
+        const videoTrack = captured.getVideoTracks()[0]
+        if (!videoTrack) {
+          return
+        }
+        const tracks = [videoTrack]
+        const audioDest = pipAudioContext.createMediaStreamDestination()
+        pipAudioSourceNode.connect(audioDest)
+        pipStreamAudioDest = audioDest
+        const audioTrack = audioDest.stream.getAudioTracks()[0]
+        if (audioTrack) {
+          tracks.push(audioTrack)
+        }
+
+        const mimeType = [
+          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+          'video/webm;codecs=vp8,opus',
+          'video/webm'
+        ].find(type => MediaRecorder.isTypeSupported(type))
+        if (!mimeType) {
+          stopAndroidPipStream()
+          return
+        }
+
+        const recorder = new MediaRecorder(new MediaStream(tracks), {
+          mimeType,
+          videoBitsPerSecond: 2_500_000,
+          audioBitsPerSecond: 128_000
+        })
+
+        // chunks must reach the native demuxer in order
+        let chunkChain = Promise.resolve()
+        recorder.ondataavailable = (event) => {
+          if (!event.data || event.data.size === 0 || pipStreamRecorder !== recorder) {
+            return
+          }
+          chunkChain = chunkChain
+            .then(() => event.data.arrayBuffer())
+            .then((arrayBuffer) => {
+              if (pipStreamRecorder !== recorder) {
+                return
+              }
+              const bytes = new Uint8Array(arrayBuffer)
+              let binary = ''
+              for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+              }
+              android.sendPipStreamChunk(btoa(binary))
+            })
+            .catch(() => {
+              stopAndroidPipStream()
+            })
+        }
+        recorder.onerror = () => {
+          stopAndroidPipStream()
+        }
+
+        android.sendPipStreamStart(mimeType)
+        recorder.start(250)
+        pipStreamRecorder = recorder
+      } catch {
+        stopAndroidPipStream()
+      }
+    }
+
+    function stopAndroidPipStream() {
+      const recorder = pipStreamRecorder
+      pipStreamRecorder = null
+      if (recorder) {
+        try {
+          recorder.stop()
+        } catch {
+          // already stopped
+        }
+      }
+      if (pipStreamAudioDest && pipAudioSourceNode) {
+        try {
+          pipAudioSourceNode.disconnect(pipStreamAudioDest)
+        } catch {
+          // already disconnected
+        }
+      }
+      pipStreamAudioDest = null
+      if (typeof android.sendPipStreamEnd === 'function') {
+        try {
+          android.sendPipStreamEnd()
+        } catch {
+          // native side already closed
+        }
+      }
+    }
+
+    function handlePipStreamRendering() {
+      // native player has the picture and the audio: silence the
+      // speaker route and stop the JPEG relay
+      setPipSpeakersMuted(true)
+      disableAndroidPipAudioSync()
+      stopAndroidPipMirror()
+    }
+
+    function handlePipStreamFailed() {
+      stopAndroidPipStream()
+      setPipSpeakersMuted(false)
+      startAndroidPipMirror()
+      enableAndroidPipAudioSync()
+    }
+
+    // #endregion android pip media stream
 
     function startAndroidPipMirror() {
       const videoEl = video.value
@@ -675,15 +843,30 @@ export default defineComponent({
 
       setAndroidPipLayout(true)
       syncAndroidPipState()
-      startAndroidPipMirror()
-      enableAndroidPipAudioSync()
+      beginAndroidPipSession()
       enterPictureInPicture()
+    }
+
+    async function beginAndroidPipSession() {
+      window.__ftPipStreamRendering = handlePipStreamRendering
+      window.__ftPipStreamFailed = handlePipStreamFailed
+      startAndroidPipMirror()
+      await enableAndroidPipAudioSync()
+      startAndroidPipStream()
+    }
+
+    function endAndroidPipSession() {
+      delete window.__ftPipStreamRendering
+      delete window.__ftPipStreamFailed
+      stopAndroidPipStream()
+      stopAndroidPipMirror()
+      disableAndroidPipAudioSync()
+      setPipSpeakersMuted(false)
     }
 
     function handleAndroidPipEnter() {
       setAndroidPipLayout(true)
-      startAndroidPipMirror()
-      enableAndroidPipAudioSync()
+      beginAndroidPipSession()
       try {
         document.exitFullscreen()
       } catch {
@@ -692,8 +875,7 @@ export default defineComponent({
     }
 
     function handleAndroidPipExit() {
-      stopAndroidPipMirror()
-      disableAndroidPipAudioSync()
+      endAndroidPipSession()
       setAndroidPipLayout(false)
     }
 
@@ -3756,7 +3938,7 @@ export default defineComponent({
       window.removeEventListener('pip-exit', handleAndroidPipExit)
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
-        stopAndroidPipMirror()
+        endAndroidPipSession()
         closeAndroidPipAudioSync()
         setPictureInPictureState(false, false, 16, 9)
       }
