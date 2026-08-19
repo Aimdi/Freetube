@@ -2,6 +2,7 @@ package io.freetubeapp.freetube
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
@@ -212,13 +213,24 @@ class MainActivity: FreeTubeActivity() {
     }
   }
 
+  fun setNativePipPoster(bitmap: Bitmap) {
+    if (!::nativePipPlayer.isInitialized) {
+      return
+    }
+    nativePipPlayer.setPosterBitmap(bitmap)
+    if (isInPictureInPictureMode || pipEnterInProgress) {
+      nativePipPlayer.showOverlay()
+    }
+  }
+
   private fun startNativePipPlayback() {
+    nativePipPlayer.showOverlay()
     val url = state.nativePipUrl
     if (url.isNullOrBlank()) {
       nativePipPlayer.showPosterOnly(state.nativePipThumbnailUrl)
       return
     }
-    if (state.usingNativePip && nativePipPlayer.lastUrl == url) {
+    if (nativePipPlayer.lastUrl == url) {
       return
     }
     nativePipPlayer.start(
@@ -228,15 +240,18 @@ class MainActivity: FreeTubeActivity() {
       thumbnailUrl = state.nativePipThumbnailUrl,
       userAgent = webView.settings.userAgentString,
       playWhenReady = state.pictureInPicturePlaying || !state.paused,
+      onFirstFrame = {
+        state.usingNativePip = true
+        webView.evaluateJavascript(
+          "window.__androidNativePip = true; var v = document.querySelector('video.player'); if (v) { v.pause(); }",
+          null
+        )
+      },
       onError = {
-        // Keep the poster visible; WebView audio can continue in the background.
+        state.usingNativePip = false
+        nativePipPlayer.clearLastUrl()
         webView.evaluateJavascript("window.__androidNativePip = false", null)
       }
-    )
-    state.usingNativePip = true
-    webView.evaluateJavascript(
-      "window.__androidNativePip = true; var v = document.querySelector('video.player'); if (v) { v.pause(); }",
-      null
     )
   }
 

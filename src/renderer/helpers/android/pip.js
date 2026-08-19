@@ -38,6 +38,16 @@ export function setNativePipMedia(url, mimeType, positionMs, thumbnailUrl) {
 }
 
 /**
+ * Sends a JPEG still of the current video frame for the PiP window.
+ * @param {string|null} dataUrl
+ */
+export function setNativePipPoster(dataUrl) {
+  if (dataUrl && typeof android.setNativePipPoster === 'function') {
+    android.setNativePipPoster(dataUrl)
+  }
+}
+
+/**
  * Asks Android to enter system Picture-in-Picture immediately.
  */
 export function enterPictureInPicture() {

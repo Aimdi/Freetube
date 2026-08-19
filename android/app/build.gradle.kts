@@ -86,6 +86,7 @@ android {
     }
     kotlinOptions {
         jvmTarget = "1.8"
+        freeCompilerArgs += "-opt-in=androidx.media3.common.util.UnstableApi"
     }
     buildFeatures {
         viewBinding = true

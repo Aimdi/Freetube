@@ -1,21 +1,27 @@
 package io.freetubeapp.freetube.helpers
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.widget.FrameLayout
+import android.widget.ImageView
+import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -29,11 +35,21 @@ import kotlin.concurrent.thread
 /**
  * Plays the current watch-page stream on a TextureView so Android system
  * Picture-in-Picture has a real composited surface.
- *
- * WebView HTML5/Shaka video is decoded onto a hardware overlay / SurfaceView
- * that PiP cannot capture, which is why the floating window was black.
  */
+@UnstableApi
 class NativePipPlayer(private val context: Context) {
+  private val overlay = FrameLayout(context).apply {
+    layoutParams = CoordinatorLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+    setBackgroundColor(Color.BLACK)
+    visibility = View.GONE
+    elevation = 64f
+    isClickable = true
+  }
+  private val posterView = ImageView(context).apply {
+    layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT, Gravity.CENTER)
+    scaleType = ImageView.ScaleType.FIT_CENTER
+    setBackgroundColor(Color.BLACK)
+  }
   val playerView: PlayerView = View.inflate(context, R.layout.pip_player, null) as PlayerView
   private val mainHandler = Handler(Looper.getMainLooper())
   private var player: ExoPlayer? = null
@@ -41,10 +57,13 @@ class NativePipPlayer(private val context: Context) {
     private set
 
   init {
-    playerView.layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+    playerView.layoutParams = FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
     playerView.setBackgroundColor(Color.BLACK)
     playerView.setShutterBackgroundColor(Color.BLACK)
     playerView.useController = false
+    playerView.visibility = View.VISIBLE
+    overlay.addView(posterView)
+    overlay.addView(playerView)
   }
 
   val isPlaying: Boolean
@@ -54,10 +73,22 @@ class NativePipPlayer(private val context: Context) {
     get() = player?.currentPosition ?: 0L
 
   fun attachTo(parent: ViewGroup) {
-    if (playerView.parent !== parent) {
-      (playerView.parent as? ViewGroup)?.removeView(playerView)
-      parent.addView(playerView)
+    if (overlay.parent !== parent) {
+      (overlay.parent as? ViewGroup)?.removeView(overlay)
+      val params = if (parent is CoordinatorLayout) {
+        CoordinatorLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+      } else {
+        ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+      }
+      overlay.layoutParams = params
+      parent.addView(overlay)
     }
+  }
+
+  fun showOverlay() {
+    overlay.visibility = View.VISIBLE
+    overlay.bringToFront()
+    overlay.requestLayout()
   }
 
   fun start(
@@ -67,13 +98,14 @@ class NativePipPlayer(private val context: Context) {
     thumbnailUrl: String?,
     userAgent: String,
     playWhenReady: Boolean,
+    onFirstFrame: () -> Unit,
     onError: () -> Unit
   ) {
     lastUrl = url
     loadThumbnail(thumbnailUrl)
-    playerView.visibility = View.VISIBLE
+    showOverlay()
 
-    val exo = player ?: createPlayer(userAgent, onError).also { player = it }
+    val exo = player ?: createPlayer(userAgent, onFirstFrame, onError).also { player = it }
     playerView.player = exo
 
     val mediaItem = MediaItem.Builder()
@@ -90,7 +122,17 @@ class NativePipPlayer(private val context: Context) {
 
   fun showPosterOnly(thumbnailUrl: String?) {
     loadThumbnail(thumbnailUrl)
-    playerView.visibility = View.VISIBLE
+    showOverlay()
+  }
+
+  fun setPosterBitmap(bitmap: Bitmap?) {
+    if (bitmap == null) {
+      return
+    }
+    mainHandler.post {
+      posterView.setImageBitmap(bitmap)
+      playerView.defaultArtwork = BitmapDrawable(context.resources, bitmap)
+    }
   }
 
   fun play() {
@@ -104,7 +146,7 @@ class NativePipPlayer(private val context: Context) {
   fun stop() {
     player?.stop()
     playerView.player = null
-    playerView.visibility = View.GONE
+    overlay.visibility = View.GONE
     lastUrl = null
   }
 
@@ -112,20 +154,31 @@ class NativePipPlayer(private val context: Context) {
     playerView.player = null
     player?.release()
     player = null
-    playerView.visibility = View.GONE
+    overlay.visibility = View.GONE
     lastUrl = null
   }
 
-  private fun createPlayer(userAgent: String, onError: () -> Unit): ExoPlayer {
-    val httpFactory = DefaultHttpDataSource.Factory()
-      .setUserAgent(userAgent)
-      .setAllowCrossProtocolRedirects(true)
-    val dataSourceFactory = DefaultDataSource.Factory(context, httpFactory)
+  fun clearLastUrl() {
+    lastUrl = null
+  }
+
+  private fun createPlayer(
+    userAgent: String,
+    onFirstFrame: () -> Unit,
+    onError: () -> Unit
+  ): ExoPlayer {
+    val dataSourceFactory = DefaultDataSource.Factory(context, GoogleVideoDataSource.Factory(userAgent))
     val exo = ExoPlayer.Builder(context)
       .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
       .build()
     exo.addListener(object : Player.Listener {
+      override fun onRenderedFirstFrame() {
+        posterView.visibility = View.GONE
+        onFirstFrame()
+      }
+
       override fun onPlayerError(error: PlaybackException) {
+        posterView.visibility = View.VISIBLE
         onError()
       }
     })
@@ -165,11 +218,24 @@ class NativePipPlayer(private val context: Context) {
       try {
         val bytes = URL(thumbnailUrl).readBytes()
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@thread
-        mainHandler.post {
-          playerView.defaultArtwork = BitmapDrawable(context.resources, bitmap)
-        }
+        setPosterBitmap(bitmap)
       } catch (_: Exception) {
-        // Poster is optional; the TextureView still shows decoded frames.
+        // Optional; JS may also push a captured frame.
+      }
+    }
+  }
+
+  companion object {
+    fun decodeDataUrl(dataUrl: String): Bitmap? {
+      val comma = dataUrl.indexOf(',')
+      if (comma < 0) {
+        return null
+      }
+      return try {
+        val bytes = Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+      } catch (_: Exception) {
+        null
       }
     }
   }

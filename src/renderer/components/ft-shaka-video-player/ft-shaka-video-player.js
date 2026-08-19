@@ -33,7 +33,7 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setNativePipMedia, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
+import { enterPictureInPicture, isInPictureInPicture, setNativePipMedia, setNativePipPoster, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -352,16 +352,8 @@ export default defineComponent({
         }
       }
 
-      const manifest = props.manifestSrc
-      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
-        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
-          return {
-            url: manifest,
-            mimeType: props.manifestMimeType || 'application/dash+xml'
-          }
-        }
-      }
-
+      // Prefer a muxed progressive URL. DASH/SABR googlevideo segments
+      // need a YouTube POST DataSource and fail more often in ExoPlayer.
       const formats = (props.legacyFormats || [])
         .filter(format => format.url)
         .slice()
@@ -374,7 +366,38 @@ export default defineComponent({
         }
       }
 
+      const manifest = props.manifestSrc
+      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
+        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
+          return {
+            url: manifest,
+            mimeType: props.manifestMimeType || 'application/dash+xml'
+          }
+        }
+      }
+
       return null
+    }
+
+    function captureAndroidPipPoster() {
+      if (!process.env.IS_ANDROID) {
+        return
+      }
+      const videoEl = video.value
+      if (!videoEl || !videoEl.videoWidth) {
+        return
+      }
+      try {
+        const maxWidth = 640
+        const scale = Math.min(1, maxWidth / videoEl.videoWidth)
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(videoEl.videoWidth * scale))
+        canvas.height = Math.max(1, Math.round(videoEl.videoHeight * scale))
+        canvas.getContext('2d').drawImage(videoEl, 0, 0, canvas.width, canvas.height)
+        setNativePipPoster(canvas.toDataURL('image/jpeg', 0.7))
+      } catch {
+        // Canvas is tainted when the stream has no CORS headers.
+      }
     }
 
     function syncAndroidPipState() {
@@ -428,10 +451,12 @@ export default defineComponent({
 
       setAndroidPipLayout(true)
       syncAndroidPipState()
+      captureAndroidPipPoster()
       enterPictureInPicture()
     }
 
     function handleAndroidPipEnter() {
+      captureAndroidPipPoster()
       setAndroidPipLayout(true)
       try {
         document.exitFullscreen()
@@ -2955,6 +2980,7 @@ export default defineComponent({
           android.enableKeepScreenOn()
           updateMediaSessionState(STATE_PLAYING)
           syncAndroidPipState()
+          captureAndroidPipPoster()
         })
         videoElement.addEventListener('pause', () => {
           if (window.__androidNativePip) {
@@ -2969,6 +2995,7 @@ export default defineComponent({
         })
         videoElement.addEventListener('loadedmetadata', () => {
           syncAndroidPipState()
+          captureAndroidPipPoster()
         })
         videoElement.addEventListener('timeupdate', () => {
           updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
