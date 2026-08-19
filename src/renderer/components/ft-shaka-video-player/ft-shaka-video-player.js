@@ -381,6 +381,82 @@ export default defineComponent({
     /** @type {(() => void)|null} */
     let pipMirrorStop = null
 
+    /*
+      Lip-sync compensation: the PiP picture arrives ~100ms late
+      (capture + encode + bridge + decode + draw) while audio plays
+      instantly. Routing the element's audio through a DelayNode and
+      matching the measured frame latency brings lips back in sync.
+      Delay is 0 outside PiP. MediaElementSource has the same CORS
+      requirements as the canvas relay, which is already working.
+    */
+    /** @type {AudioContext|null} */
+    let pipAudioContext = null
+    /** @type {DelayNode|null} */
+    let pipAudioDelay = null
+    let pipFrameLatencyMs = 70
+
+    async function enableAndroidPipAudioSync() {
+      const videoEl = video.value
+      if (!videoEl) {
+        return
+      }
+      try {
+        if (!pipAudioContext) {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)()
+          await ctx.resume()
+          if (ctx.state !== 'running') {
+            await ctx.close()
+            return
+          }
+          const delayNode = ctx.createDelay(1.0)
+          delayNode.delayTime.value = 0
+          const source = ctx.createMediaElementSource(videoEl)
+          source.connect(delayNode)
+          delayNode.connect(ctx.destination)
+          pipAudioContext = ctx
+          pipAudioDelay = delayNode
+        }
+        updateAndroidPipAudioDelay()
+      } catch {
+        // audio keeps playing directly; sync stays as-is
+      }
+    }
+
+    function updateAndroidPipAudioDelay() {
+      if (!pipAudioContext || !pipAudioDelay) {
+        return
+      }
+      // measured in-page latency + native decode/draw and display latency
+      const target = Math.min(0.35, Math.max(0.05, (pipFrameLatencyMs + 55) / 1000))
+      try {
+        pipAudioDelay.delayTime.setTargetAtTime(target, pipAudioContext.currentTime, 0.1)
+      } catch {
+        // keep previous delay
+      }
+    }
+
+    function disableAndroidPipAudioSync() {
+      if (pipAudioContext && pipAudioDelay) {
+        try {
+          pipAudioDelay.delayTime.setTargetAtTime(0, pipAudioContext.currentTime, 0.05)
+        } catch {
+          // keep previous delay
+        }
+      }
+    }
+
+    function closeAndroidPipAudioSync() {
+      if (pipAudioContext) {
+        try {
+          pipAudioContext.close()
+        } catch {
+          // already closed
+        }
+        pipAudioContext = null
+        pipAudioDelay = null
+      }
+    }
+
     function startAndroidPipMirror() {
       const videoEl = video.value
       const containerEl = container.value
@@ -401,6 +477,7 @@ export default defineComponent({
       let vfcHandle = null
       let relayBusy = false
       let lastCaptureTime = 0
+      let relayedFrameCount = 0
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
       const canRelayFrames = typeof android.sendPipFrame === 'function'
@@ -422,7 +499,7 @@ export default defineComponent({
 
         // The PiP window is small; capping the buffer keeps drawImage
         // and the frame relay cheap
-        const scale = Math.min(1, 480 / videoWidth)
+        const scale = Math.min(1, 432 / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
         if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
@@ -450,6 +527,7 @@ export default defineComponent({
         */
         if (canRelayFrames && !relayBusy) {
           relayBusy = true
+          const captureStart = performance.now()
           try {
             canvas.toBlob((blob) => {
               if (!blob || stopped) {
@@ -465,13 +543,20 @@ export default defineComponent({
                   } catch {
                     // bridge hiccup; next frame will arrive shortly
                   }
+                  // Smoothed in-page latency for the audio delay line
+                  const sampled = performance.now() - captureStart
+                  pipFrameLatencyMs = pipFrameLatencyMs * 0.85 + sampled * 0.15
+                  relayedFrameCount++
+                  if (relayedFrameCount % 30 === 0) {
+                    updateAndroidPipAudioDelay()
+                  }
                 }
               }
               reader.onerror = () => {
                 relayBusy = false
               }
               reader.readAsDataURL(blob)
-            }, 'image/jpeg', 0.5)
+            }, 'image/jpeg', 0.45)
           } catch {
             // tainted canvas; the in-page mirror keeps running
             relayBusy = false
@@ -562,12 +647,14 @@ export default defineComponent({
       setAndroidPipLayout(true)
       syncAndroidPipState()
       startAndroidPipMirror()
+      enableAndroidPipAudioSync()
       enterPictureInPicture()
     }
 
     function handleAndroidPipEnter() {
       setAndroidPipLayout(true)
       startAndroidPipMirror()
+      enableAndroidPipAudioSync()
       try {
         document.exitFullscreen()
       } catch {
@@ -577,6 +664,7 @@ export default defineComponent({
 
     function handleAndroidPipExit() {
       stopAndroidPipMirror()
+      disableAndroidPipAudioSync()
       setAndroidPipLayout(false)
     }
 
@@ -3640,6 +3728,7 @@ export default defineComponent({
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
         stopAndroidPipMirror()
+        closeAndroidPipAudioSync()
         setPictureInPictureState(false, false, 16, 9)
       }
     })
