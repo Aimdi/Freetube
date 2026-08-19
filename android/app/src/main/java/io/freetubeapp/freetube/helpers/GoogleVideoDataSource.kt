@@ -6,6 +6,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import java.nio.charset.StandardCharsets
 
@@ -28,8 +29,29 @@ class GoogleVideoDataSource(
   override fun open(dataSpec: DataSpec): Long {
     leftover = null
     leftoverPos = 0
-    var spec = rewrite(dataSpec)
+    return try {
+      openInternal(dataSpec, youtubePost = false)
+    } catch (error: HttpDataSource.InvalidResponseCodeException) {
+      if (error.responseCode == 403 && isGoogleVideo(dataSpec.uri)) {
+        try {
+          upstream.close()
+        } catch (_: Exception) {
+        }
+        leftover = null
+        leftoverPos = 0
+        openInternal(dataSpec, youtubePost = true)
+      } else {
+        throw error
+      }
+    }
+  }
+
+  private fun openInternal(dataSpec: DataSpec, youtubePost: Boolean): Long {
+    var spec = if (youtubePost) rewrite(dataSpec) else dataSpec
     var length = upstream.open(spec)
+    if (!youtubePost) {
+      return length
+    }
     val redirect = consumeIfRedirectBody()
     if (redirect != null) {
       upstream.close()
@@ -45,6 +67,11 @@ class GoogleVideoDataSource(
       length = upstream.open(spec)
     }
     return length
+  }
+
+  private fun isGoogleVideo(uri: Uri): Boolean {
+    val host = uri.host ?: return false
+    return host.endsWith("googlevideo.com") && uri.path == "/videoplayback"
   }
 
   override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
@@ -143,17 +170,22 @@ class GoogleVideoDataSource(
     return builder.build()
   }
 
-  class Factory(private val userAgent: String) : DataSource.Factory {
+  class Factory(
+    private val userAgent: String,
+    private val cookies: String? = null
+  ) : DataSource.Factory {
     override fun createDataSource(): DataSource {
+      val headers = mutableMapOf(
+        "Origin" to "https://www.youtube.com",
+        "Referer" to "https://www.youtube.com/"
+      )
+      if (!cookies.isNullOrBlank()) {
+        headers["Cookie"] = cookies
+      }
       val http = DefaultHttpDataSource.Factory()
         .setUserAgent(userAgent)
         .setAllowCrossProtocolRedirects(true)
-        .setDefaultRequestProperties(
-          mapOf(
-            "Origin" to "https://www.youtube.com",
-            "Referer" to "https://www.youtube.com/"
-          )
-        )
+        .setDefaultRequestProperties(headers)
         .createDataSource()
       return GoogleVideoDataSource(http)
     }

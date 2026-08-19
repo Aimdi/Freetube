@@ -51,7 +51,7 @@
       android:theme="@style/Theme.FreeTubeAndroid"
       android:configChanges="screenSize|smallestScreenSize|orientation|screenLayout|uiMode"
       android:launchMode="singleTask"
-      android:supportsPictureInPicture="true"
+      android:supportsPictureInPicture="false"
       android:resizeableActivity="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
@@ -102,6 +102,17 @@
       </intent-filter>
 
     </activity>
+
+    <activity
+      android:name=".PipPlayerActivity"
+      android:theme="@style/Theme.FreeTubeAndroid.Pip"
+      android:exported="false"
+      android:excludeFromRecents="true"
+      android:autoRemoveFromRecents="true"
+      android:supportsPictureInPicture="true"
+      android:resizeableActivity="true"
+      android:launchMode="singleTask"
+      android:configChanges="screenSize|smallestScreenSize|orientation|screenLayout|uiMode" />
 
   </application>
 

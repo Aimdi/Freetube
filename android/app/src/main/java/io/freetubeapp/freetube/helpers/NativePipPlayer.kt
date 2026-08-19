@@ -99,13 +99,14 @@ class NativePipPlayer(private val context: Context) {
     userAgent: String,
     playWhenReady: Boolean,
     onFirstFrame: () -> Unit,
-    onError: () -> Unit
+    onError: () -> Unit,
+    cookies: String? = null
   ) {
     lastUrl = url
     loadThumbnail(thumbnailUrl)
     showOverlay()
 
-    val exo = player ?: createPlayer(userAgent, onFirstFrame, onError).also { player = it }
+    val exo = player ?: createPlayer(userAgent, cookies, onFirstFrame, onError).also { player = it }
     playerView.player = exo
 
     val mediaItem = MediaItem.Builder()
@@ -164,10 +165,11 @@ class NativePipPlayer(private val context: Context) {
 
   private fun createPlayer(
     userAgent: String,
+    cookies: String?,
     onFirstFrame: () -> Unit,
     onError: () -> Unit
   ): ExoPlayer {
-    val dataSourceFactory = DefaultDataSource.Factory(context, GoogleVideoDataSource.Factory(userAgent))
+    val dataSourceFactory = DefaultDataSource.Factory(context, GoogleVideoDataSource.Factory(userAgent, cookies))
     val exo = ExoPlayer.Builder(context)
       .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
       .build()
@@ -216,9 +218,16 @@ class NativePipPlayer(private val context: Context) {
     }
     thread(name = "pip-thumb") {
       try {
-        val bytes = URL(thumbnailUrl).readBytes()
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@thread
-        setPosterBitmap(bitmap)
+        val connection = URL(thumbnailUrl).openConnection()
+        val agent = PipPlaybackSession.userAgent
+        if (agent.isNotBlank()) {
+          connection.setRequestProperty("User-Agent", agent)
+        }
+        PipPlaybackSession.cookies?.let { connection.setRequestProperty("Cookie", it) }
+        connection.getInputStream().use { stream ->
+          val bitmap = BitmapFactory.decodeStream(stream) ?: return@thread
+          setPosterBitmap(bitmap)
+        }
       } catch (_: Exception) {
         // Optional; JS may also push a captured frame.
       }
