@@ -125,15 +125,19 @@ class MainActivity: FreeTubeActivity() {
     if (!PictureInPictureHelper.supportsPictureInPicture(this)) {
       return
     }
-    setPictureInPictureParams(
-      PictureInPictureHelper.buildParams(
-        this,
-        state.pictureInPictureAspectWidth,
-        state.pictureInPictureAspectHeight,
-        state.canEnterPictureInPicture,
-        state.pictureInPicturePlaying
+    try {
+      setPictureInPictureParams(
+        PictureInPictureHelper.buildParams(
+          this,
+          state.pictureInPictureAspectWidth,
+          state.pictureInPictureAspectHeight,
+          state.canEnterPictureInPicture,
+          state.pictureInPicturePlaying
+        )
       )
-    )
+    } catch (_: IllegalStateException) {
+      // Activity is finishing or not in a valid PiP state
+    }
   }
 
   fun enterPictureInPictureModeIfPossible(requireAutoEnter: Boolean = false): Boolean {
@@ -143,15 +147,19 @@ class MainActivity: FreeTubeActivity() {
     if (requireAutoEnter && !state.canEnterPictureInPicture) {
       return false
     }
-    return enterPictureInPictureMode(
-      PictureInPictureHelper.buildParams(
-        this,
-        state.pictureInPictureAspectWidth,
-        state.pictureInPictureAspectHeight,
-        state.canEnterPictureInPicture,
-        state.pictureInPicturePlaying
+    return try {
+      enterPictureInPictureMode(
+        PictureInPictureHelper.buildParams(
+          this,
+          state.pictureInPictureAspectWidth,
+          state.pictureInPictureAspectHeight,
+          state.canEnterPictureInPicture,
+          state.pictureInPicturePlaying
+        )
       )
-    )
+    } catch (_: IllegalStateException) {
+      false
+    }
   }
 
   override fun onBack() {
