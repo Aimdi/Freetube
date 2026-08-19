@@ -23,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
 import java.io.File
 import java.nio.charset.Charset
+import kotlin.concurrent.thread
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -460,6 +461,18 @@ class FreeTubeJavaScriptInterface(
     return context.state.isInPictureInPicture
   }
 
+  /*
+    Latest-frame-wins handoff, decoded off the JavaBridge thread.
+
+    Decoding inline queued every incoming frame behind slower decodes, so
+    the PiP image fell further and further behind real time — playing back
+    in slow motion. A single pending slot plus a dedicated decoder thread
+    drops stale frames instead of delaying fresh ones, so the PiP window
+    always shows the newest frame.
+  */
+  private val pipFrameLock = Object()
+  private var pipFramePending: String? = null
+  private var pipFrameDecoderStarted = false
   // Rotating pool so ~30fps decoding reuses pixel buffers instead of
   // allocating a new bitmap per frame (avoids constant GC pauses).
   private val pipFramePool = arrayOfNulls<android.graphics.Bitmap>(3)
@@ -472,6 +485,31 @@ class FreeTubeJavaScriptInterface(
    */
   @JavascriptInterface
   fun sendPipFrame(dataUrl: String) {
+    synchronized(pipFrameLock) {
+      pipFramePending = dataUrl
+      if (!pipFrameDecoderStarted) {
+        pipFrameDecoderStarted = true
+        thread(isDaemon = true, name = "pip-frame-decoder") { pipFrameDecodeLoop() }
+      }
+      pipFrameLock.notify()
+    }
+  }
+
+  private fun pipFrameDecodeLoop() {
+    while (true) {
+      val dataUrl = synchronized(pipFrameLock) {
+        while (pipFramePending == null) {
+          pipFrameLock.wait()
+        }
+        val pending = pipFramePending!!
+        pipFramePending = null
+        pending
+      }
+      decodePipFrame(dataUrl)
+    }
+  }
+
+  private fun decodePipFrame(dataUrl: String) {
     val comma = dataUrl.indexOf(',')
     if (comma < 0) {
       return
