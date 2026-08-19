@@ -131,7 +131,6 @@ object PictureInPictureHelper {
           'html.androidPip .offlineMessage,',
           'html.androidPip .skippedSegmentsWrapper {',
           '  display: none !important;',
-          '  visibility: hidden !important;',
           '}',
           'html.androidPip .app,',
           'html.androidPip .flexBox,',

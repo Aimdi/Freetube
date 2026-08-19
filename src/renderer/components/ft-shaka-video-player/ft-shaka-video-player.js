@@ -33,7 +33,7 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setNativePipMedia, setNativePipPoster, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
+import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -344,62 +344,6 @@ export default defineComponent({
       return { width, height }
     }
 
-    function getNativePipMedia() {
-      if (props.format === 'legacy' && activeLegacyFormat.value?.url) {
-        return {
-          url: activeLegacyFormat.value.url,
-          mimeType: activeLegacyFormat.value.mimeType || 'video/mp4'
-        }
-      }
-
-      // Prefer a muxed progressive URL. DASH/SABR googlevideo segments
-      // need a YouTube POST DataSource and fail more often in ExoPlayer.
-      const formats = (props.legacyFormats || [])
-        .filter(format => format.url)
-        .slice()
-        .sort((a, b) => (b.height || 0) - (a.height || 0))
-
-      if (formats[0]) {
-        return {
-          url: formats[0].url,
-          mimeType: formats[0].mimeType || 'video/mp4'
-        }
-      }
-
-      const manifest = props.manifestSrc
-      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
-        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
-          return {
-            url: manifest,
-            mimeType: props.manifestMimeType || 'application/dash+xml'
-          }
-        }
-      }
-
-      return null
-    }
-
-    function captureAndroidPipPoster() {
-      if (!process.env.IS_ANDROID) {
-        return
-      }
-      const videoEl = video.value
-      if (!videoEl || !videoEl.videoWidth) {
-        return
-      }
-      try {
-        const maxWidth = 640
-        const scale = Math.min(1, maxWidth / videoEl.videoWidth)
-        const canvas = document.createElement('canvas')
-        canvas.width = Math.max(1, Math.round(videoEl.videoWidth * scale))
-        canvas.height = Math.max(1, Math.round(videoEl.videoHeight * scale))
-        canvas.getContext('2d').drawImage(videoEl, 0, 0, canvas.width, canvas.height)
-        setNativePipPoster(canvas.toDataURL('image/jpeg', 0.7))
-      } catch {
-        // Canvas is tainted when the stream has no CORS headers.
-      }
-    }
-
     function syncAndroidPipState() {
       if (!process.env.IS_ANDROID) {
         return
@@ -407,10 +351,10 @@ export default defineComponent({
 
       const videoEl = video.value
       const { width, height } = getAndroidPipAspectRatio()
-      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended && !window.__androidNativePip)
-      const canAutoEnter = (isPlaying || window.__androidNativePip) && props.format !== 'audio' && autoEnterPipOnLeave.value
+      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended)
+      const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
 
-      setPictureInPictureState(canAutoEnter, isPlaying || !!window.__androidNativePip, width, height)
+      setPictureInPictureState(canAutoEnter, isPlaying, width, height)
 
       const boxEl = container.value || videoEl
       if (boxEl) {
@@ -419,15 +363,119 @@ export default defineComponent({
           setPictureInPictureSourceRect(box.left, box.top, box.width, box.height)
         }
       }
-
-      const nativeMedia = props.format === 'audio' ? null : getNativePipMedia()
-      setNativePipMedia(
-        nativeMedia?.url || null,
-        nativeMedia?.mimeType || null,
-        Math.floor((videoEl?.currentTime || 0) * 1000),
-        props.thumbnail || null
-      )
     }
+
+    // #region android pip canvas mirror
+
+    /*
+      Android system PiP scales the activity window, but Chromium decodes
+      <video> onto a hardware overlay that is not part of that window —
+      the PiP surface shows a black hole where the video is. A 2D canvas
+      *is* a normal compositor texture, so mirroring the frames onto a
+      canvas makes them visible in PiP. Drawing a cross-origin video into
+      a canvas is allowed (only pixel readback taints), and works for
+      every format: legacy, DASH, HLS and SABR.
+    */
+    /** @type {HTMLCanvasElement|null} */
+    let pipMirrorCanvas = null
+    /** @type {(() => void)|null} */
+    let pipMirrorStop = null
+
+    function startAndroidPipMirror() {
+      const videoEl = video.value
+      const containerEl = container.value
+      if (!videoEl || !containerEl || pipMirrorCanvas) {
+        return
+      }
+
+      const canvas = document.createElement('canvas')
+      canvas.id = 'ftAndroidPipCanvas'
+      canvas.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;z-index:2147483647;' +
+        'background:#000;object-fit:contain;display:block;pointer-events:none;'
+      const ctx = canvas.getContext('2d')
+      containerEl.appendChild(canvas)
+      pipMirrorCanvas = canvas
+
+      let stopped = false
+      let vfcHandle = null
+      let rafHandle = null
+
+      const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
+
+      const draw = () => {
+        if (stopped) {
+          return
+        }
+        const videoWidth = videoEl.videoWidth
+        const videoHeight = videoEl.videoHeight
+        if (videoWidth > 0 && videoHeight > 0) {
+          // The PiP window is small; capping the buffer keeps drawImage cheap
+          const scale = Math.min(1, 854 / videoWidth)
+          const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
+          const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
+          if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+            canvas.width = canvasWidth
+            canvas.height = canvasHeight
+          }
+          try {
+            ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
+          } catch {
+            // ignore decoder hiccups; next frame will draw
+          }
+        }
+        schedule()
+      }
+
+      const schedule = () => {
+        if (stopped) {
+          return
+        }
+        if (supportsVfc) {
+          vfcHandle = videoEl.requestVideoFrameCallback(draw)
+        } else {
+          rafHandle = requestAnimationFrame(draw)
+        }
+      }
+
+      // paint the current frame immediately, even while paused
+      draw()
+
+      // Safety net: some WebView versions throttle frame callbacks in PiP
+      const redrawInterval = setInterval(() => {
+        if (!stopped && videoEl.videoWidth > 0) {
+          try {
+            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height)
+          } catch {
+            // ignore
+          }
+        }
+      }, 500)
+
+      pipMirrorStop = () => {
+        stopped = true
+        clearInterval(redrawInterval)
+        if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
+          videoEl.cancelVideoFrameCallback(vfcHandle)
+        }
+        if (rafHandle !== null) {
+          cancelAnimationFrame(rafHandle)
+        }
+      }
+    }
+
+    function stopAndroidPipMirror() {
+      if (pipMirrorStop) {
+        pipMirrorStop()
+        pipMirrorStop = null
+      }
+      if (pipMirrorCanvas) {
+        pipMirrorCanvas.remove()
+        pipMirrorCanvas = null
+      }
+    }
+
+    // #endregion android pip canvas mirror
 
     function setAndroidPipLayout(enabled) {
       if (typeof window.__setAndroidPip === 'function') {
@@ -451,13 +499,13 @@ export default defineComponent({
 
       setAndroidPipLayout(true)
       syncAndroidPipState()
-      captureAndroidPipPoster()
+      startAndroidPipMirror()
       enterPictureInPicture()
     }
 
     function handleAndroidPipEnter() {
-      captureAndroidPipPoster()
       setAndroidPipLayout(true)
+      startAndroidPipMirror()
       try {
         document.exitFullscreen()
       } catch {
@@ -466,6 +514,7 @@ export default defineComponent({
     }
 
     function handleAndroidPipExit() {
+      stopAndroidPipMirror()
       setAndroidPipLayout(false)
     }
 
@@ -2955,15 +3004,9 @@ export default defineComponent({
     const initLoadWaitTimeToastAC = new AbortController()
 
     const mediaPlay = () => {
-      if (window.__androidNativePip) {
-        return
-      }
       video.value.play()
     }
     const mediaPause = () => {
-      if (window.__androidNativePip) {
-        return
-      }
       video.value.pause()
     }
     let updateBufferInterval = null
@@ -2974,18 +3017,11 @@ export default defineComponent({
         window.addEventListener('media-play', mediaPlay)
         window.addEventListener('media-pause', mediaPause)
         videoElement.addEventListener('play', () => {
-          if (window.__androidNativePip) {
-            return
-          }
           android.enableKeepScreenOn()
           updateMediaSessionState(STATE_PLAYING)
           syncAndroidPipState()
-          captureAndroidPipPoster()
         })
         videoElement.addEventListener('pause', () => {
-          if (window.__androidNativePip) {
-            return
-          }
           android.disableKeepScreenOn()
           updateMediaSessionState(STATE_PAUSED)
           syncAndroidPipState()
@@ -2995,13 +3031,9 @@ export default defineComponent({
         })
         videoElement.addEventListener('loadedmetadata', () => {
           syncAndroidPipState()
-          captureAndroidPipPoster()
         })
         videoElement.addEventListener('timeupdate', () => {
           updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
-          if (!window.__androidNativePip) {
-            syncAndroidPipState()
-          }
         })
         updateBufferInterval = setInterval(() => {
           if (videoElement.buffered.length == 0) {
@@ -3536,6 +3568,7 @@ export default defineComponent({
       window.removeEventListener('pip-exit', handleAndroidPipExit)
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
+        stopAndroidPipMirror()
         setPictureInPictureState(false, false, 16, 9)
       }
     })

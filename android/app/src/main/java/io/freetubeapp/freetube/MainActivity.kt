@@ -1,16 +1,14 @@
 package io.freetubeapp.freetube
 
-import android.app.ActivityOptions
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
-import io.freetubeapp.freetube.helpers.PipPlaybackSession
 import io.freetubeapp.freetube.helpers.isDarkMode
 import io.freetubeapp.freetube.helpers.toYtUrl
 import io.freetubeapp.freetube.helpers.urlEncode
@@ -23,7 +21,7 @@ class MainActivity: FreeTubeActivity() {
       return Intent(this, KeepAliveService::class.java)
     }
   private lateinit var webView: FreeTubeWebView
-  private var launchedPip = false
+  private var pipEnterInProgress = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -60,6 +58,7 @@ class MainActivity: FreeTubeActivity() {
     // allow fullscreen shaka player to use whole window width
     window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
 
+    applyPictureInPictureParams()
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {
@@ -92,111 +91,115 @@ class MainActivity: FreeTubeActivity() {
   override fun onResume() {
     super.onResume()
     state.paused = false
-    if (launchedPip) {
-      launchedPip = false
-      webView.restoreFromPip()
-      val seconds = PipPlaybackSession.positionMs / 1000.0
-      webView.evaluateJavascript(
-        "window.__androidNativePip = false; var v = document.querySelector('video.player'); if (v) { v.currentTime = $seconds; v.play(); }",
-        null
-      )
-      webView.dispatchEvent("pip-exit")
-    }
     webView.dispatchEvent("app-resume")
   }
 
+  /**
+   * Android 12+ auto-enters PiP from the params set in [applyPictureInPictureParams].
+   * Older versions enter here. Either way the crop CSS goes in as early as possible.
+   */
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
-    launchPipPlayer(requirePlaying = true)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      if (state.canEnterPictureInPicture) {
+        cropPlayerForPictureInPicture()
+      }
+      return
+    }
+    enterPictureInPictureModeIfPossible(requireAutoEnter = true)
   }
 
   override fun onPictureInPictureRequested(): Boolean {
-    if (launchPipPlayer(requirePlaying = true)) {
+    if (state.canEnterPictureInPicture && !isInPictureInPictureMode) {
+      enterPictureInPictureModeIfPossible(requireAutoEnter = true)
       return true
     }
     return super.onPictureInPictureRequested()
   }
 
-  fun applyPictureInPictureParams() {
-    // MainActivity must not auto-enter PiP. The WebView hardware overlay
-    // would be the surface the system scales, which is always black.
-  }
-
-  fun enterPictureInPictureModeIfPossible(requireAutoEnter: Boolean = false): Boolean {
-    return launchPipPlayer(requirePlaying = requireAutoEnter)
-  }
-
-  fun handleNativePipMediaEvent(event: String): Boolean {
-    return when (event) {
-      "media-play" -> {
-        PipPlaybackSession.onPlay?.invoke()
-        PipPlaybackSession.onPlay != null
+  override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    state.isInPictureInPicture = isInPictureInPictureMode
+    pipEnterInProgress = false
+    if (isInPictureInPictureMode) {
+      webView.setBackgroundColor(Color.BLACK)
+      cropPlayerForPictureInPicture()
+      webView.dispatchEvent("pip-enter")
+    } else {
+      webView.setAndroidPipMode(false)
+      webView.setBackgroundColor(Color.TRANSPARENT)
+      webView.dispatchEvent("pip-exit")
+      if (state.paused) {
+        webView.dispatchEvent("app-pause")
       }
-      "media-pause" -> {
-        PipPlaybackSession.onPause?.invoke()
-        PipPlaybackSession.onPause != null
-      }
-      else -> false
     }
   }
 
-  fun onNativePipMediaUpdated() {
-    PipPlaybackSession.updateFromState(state, webView)
-  }
-
-  fun setNativePipPoster(bitmap: Bitmap) {
-    PipPlaybackSession.poster = bitmap
+  fun applyPictureInPictureParams() {
+    if (!PictureInPictureHelper.supportsPictureInPicture(this)) {
+      return
+    }
+    try {
+      setPictureInPictureParams(currentPictureInPictureParams())
+    } catch (_: IllegalStateException) {
+      // Activity is finishing or not in a valid PiP state
+    }
   }
 
   /**
-   * Starts a WebView-free player activity and puts *that* window in PiP.
+   * @param requireAutoEnter when true, only enter if the player reported that
+   * auto-enter-on-leave is enabled and a video is playing
    */
-  fun launchPipPlayer(requirePlaying: Boolean = false): Boolean {
-    if (!PictureInPictureHelper.supportsPictureInPicture(this)) {
+  fun enterPictureInPictureModeIfPossible(requireAutoEnter: Boolean = false): Boolean {
+    if (!PictureInPictureHelper.supportsPictureInPicture(this) || isInPictureInPictureMode || pipEnterInProgress) {
+      return isInPictureInPictureMode
+    }
+    if (requireAutoEnter && !state.canEnterPictureInPicture) {
       return false
     }
-    if (requirePlaying && !state.canEnterPictureInPicture && state.nativePipUrl.isNullOrBlank()) {
-      return false
-    }
-    PipPlaybackSession.updateFromState(state, webView)
-    if (!PipPlaybackSession.canLaunch) {
-      return false
-    }
-    launchedPip = true
-    state.usingNativePip = true
-    webView.exitHtmlFullscreen()
-    webView.forceHideForPip()
-    webView.evaluateJavascript(
-      "window.__androidNativePip = true; var v = document.querySelector('video.player'); if (v) { v.pause(); }",
-      null
-    )
-    webView.dispatchEvent("pip-enter")
-    val intent = Intent(this, PipPlayerActivity::class.java)
-      .addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
-    try {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        val options = ActivityOptions.makeLaunchIntoPip(
-          PictureInPictureHelper.buildParams(
-            this,
-            state.pictureInPictureAspectWidth,
-            state.pictureInPictureAspectHeight,
-            false,
-            state.pictureInPicturePlaying,
-            null
-          )
-        )
-        startActivity(intent, options.toBundle())
-      } else {
-        startActivity(intent)
+    pipEnterInProgress = true
+    cropPlayerForPictureInPicture {
+      webView.post {
+        enterPictureInPictureNow()
       }
-      return true
-    } catch (_: Exception) {
-      launchedPip = false
-      state.usingNativePip = false
-      webView.restoreFromPip()
-      return false
+    }
+    return true
+  }
+
+  private fun cropPlayerForPictureInPicture(after: (() -> Unit)? = null) {
+    webView.exitHtmlFullscreen()
+    webView.setBackgroundColor(Color.BLACK)
+    webView.setAndroidPipMode(true, after)
+  }
+
+  private fun enterPictureInPictureNow() {
+    if (isInPictureInPictureMode) {
+      pipEnterInProgress = false
+      return
+    }
+    try {
+      val entered = enterPictureInPictureMode(currentPictureInPictureParams(autoEnter = false))
+      if (!entered) {
+        pipEnterInProgress = false
+        webView.setAndroidPipMode(false)
+        webView.setBackgroundColor(Color.TRANSPARENT)
+      }
+    } catch (_: IllegalStateException) {
+      pipEnterInProgress = false
+      webView.setAndroidPipMode(false)
+      webView.setBackgroundColor(Color.TRANSPARENT)
     }
   }
+
+  private fun currentPictureInPictureParams(autoEnter: Boolean = state.canEnterPictureInPicture && !state.isInPictureInPicture) =
+    PictureInPictureHelper.buildParams(
+      this,
+      state.pictureInPictureAspectWidth,
+      state.pictureInPictureAspectHeight,
+      autoEnter,
+      state.pictureInPicturePlaying,
+      state.pictureInPictureSourceRect
+    )
 
   override fun onBack() {
     // bind the back button to the web-view history
@@ -206,7 +209,7 @@ class MainActivity: FreeTubeActivity() {
     } else {
       if (webView.canGoBack()) {
         webView.goBack()
-      } else if (!launchPipPlayer(requirePlaying = true)) {
+      } else if (!enterPictureInPictureModeIfPossible(requireAutoEnter = true)) {
         moveTaskToBack(true)
       }
     }

@@ -374,10 +374,6 @@ export default defineComponent({
       window.removeEventListener('media-seek', this.mediaSeek)
       android.cancelMediaNotification()
       android.setPictureInPictureState(false, false, 16, 9)
-      if (typeof android.setNativePipMedia === 'function') {
-        android.setNativePipMedia(null, null, 0, null)
-      }
-      window.__androidNativePip = false
       if (typeof window.__setAndroidPip === 'function') {
         window.__setAndroidPip(false)
       } else {
