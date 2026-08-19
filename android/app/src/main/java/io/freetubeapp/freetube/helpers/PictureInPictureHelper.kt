@@ -6,6 +6,7 @@ import android.app.PictureInPictureParams
 import android.app.RemoteAction
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.os.Build
 import android.util.Rational
@@ -14,8 +15,13 @@ import io.freetubeapp.freetube.MediaControlsReceiver
 /**
  * Builds Android system Picture-in-Picture params for the WebView player.
  *
- * Auto-enter (Home / gesture leave) is only available on Android 12+.
- * Older versions use [Activity.onUserLeaveHint] instead.
+ * Android 12+ uses [PictureInPictureParams.Builder.setAutoEnterEnabled] so Home / gesture
+ * leave can enter PiP before the activity is paused. Older versions use
+ * [Activity.onUserLeaveHint] instead.
+ *
+ * PiP shows the live activity, not a screenshot. Chrome (nav, comments, sidebar) must be
+ * hidden and the video forced to fill the WebView — otherwise the floating window shows
+ * the whole watch page.
  */
 object PictureInPictureHelper {
   private const val MAX_ASPECT_RATIO = 2.39
@@ -42,15 +48,21 @@ object PictureInPictureHelper {
     aspectWidth: Int,
     aspectHeight: Int,
     autoEnter: Boolean,
-    isPlaying: Boolean
+    isPlaying: Boolean,
+    sourceHint: Rect? = null
   ): PictureInPictureParams {
     val builder = PictureInPictureParams.Builder()
       .setAspectRatio(clampAspectRatio(aspectWidth, aspectHeight))
       .setActions(buildActions(activity, isPlaying))
 
+    if (sourceHint != null && !sourceHint.isEmpty) {
+      builder.setSourceRectHint(sourceHint)
+    }
+
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       builder.setAutoEnterEnabled(autoEnter)
-      builder.setSeamlessResizeEnabled(true)
+      // Video surfaces must not crossfade; true freezes the overlay hole.
+      builder.setSeamlessResizeEnabled(false)
     }
 
     return builder.build()
@@ -80,4 +92,118 @@ object PictureInPictureHelper {
       action("next", android.R.drawable.ic_media_next, "Next")
     )
   }
+
+  /**
+   * Installed into the WebView on every page load and immediately before PiP.
+   * Toggling `html.androidPip` crops the page to the video using % sizes
+   * (vw/vh stay at the full-screen size inside a PiP window).
+   */
+  val INSTALL_SCRIPT = """
+    (function () {
+      if (!document.getElementById('android-pip-style')) {
+        var style = document.createElement('style');
+        style.id = 'android-pip-style';
+        style.textContent = [
+          /*
+            Block hardware-overlay promotion for all videos. Overlay planes
+            are outside the window Android PiP scales (black hole) and their
+            frames cannot be read by canvas.drawImage. The tiny rotation +
+            filter force the regular composited-texture path.
+          */
+          'video {',
+          '  transform: rotateZ(0.02deg) !important;',
+          '  filter: brightness(1.001) !important;',
+          '}',
+          'html.androidPip, html.androidPip body {',
+          '  margin: 0 !important;',
+          '  padding: 0 !important;',
+          '  overflow: hidden !important;',
+          '  width: 100% !important;',
+          '  height: 100% !important;',
+          '  min-width: 0 !important;',
+          '  min-height: 0 !important;',
+          '  background: #000 !important;',
+          '}',
+          'html.androidPip .topNav,',
+          'html.androidPip .sideNav,',
+          'html.androidPip .sideNavMoreOptions,',
+          'html.androidPip .banner-wrapper,',
+          'html.androidPip .ftPrompt,',
+          'html.androidPip .videoLayout > :not(.videoArea),',
+          'html.androidPip .shaka-controls-container,',
+          'html.androidPip .shaka-scrim-container,',
+          'html.androidPip .shaka-spinner-container,',
+          'html.androidPip .shaka-overflow-menu,',
+          'html.androidPip .playerFullscreenTitleOverlay,',
+          'html.androidPip .stats,',
+          'html.androidPip .valueChangePopup,',
+          'html.androidPip .offlineWrapper,',
+          'html.androidPip .offlineMessage,',
+          'html.androidPip .skippedSegmentsWrapper {',
+          '  display: none !important;',
+          '}',
+          'html.androidPip .app,',
+          'html.androidPip .flexBox,',
+          'html.androidPip .routerView,',
+          'html.androidPip .videoLayout,',
+          'html.androidPip .videoArea,',
+          'html.androidPip .videoAreaMargin,',
+          'html.androidPip .videoPlayer {',
+          '  position: static !important;',
+          '  margin: 0 !important;',
+          '  padding: 0 !important;',
+          '  width: 100% !important;',
+          '  height: 100% !important;',
+          '  max-width: none !important;',
+          '  max-inline-size: none !important;',
+          '  max-height: none !important;',
+          '  overflow: hidden !important;',
+          '  background: #000 !important;',
+          '  transform: none !important;',
+          '}',
+          'html.androidPip .ftVideoPlayer,',
+          'html.androidPip .shaka-video-container {',
+          '  position: fixed !important;',
+          '  inset: 0 !important;',
+          '  margin: 0 !important;',
+          '  padding: 0 !important;',
+          '  width: 100% !important;',
+          '  height: 100% !important;',
+          '  max-width: none !important;',
+          '  max-inline-size: none !important;',
+          '  max-height: none !important;',
+          '  aspect-ratio: auto !important;',
+          '  overflow: hidden !important;',
+          '  background: #000 !important;',
+          '  transform: none !important;',
+          '  z-index: 2147483646 !important;',
+          '}',
+          'html.androidPip video.player,',
+          'html.androidPip .ftVideoPlayer > video {',
+          '  position: absolute !important;',
+          '  inset: 0 !important;',
+          '  width: 100% !important;',
+          '  height: 100% !important;',
+          '  max-width: none !important;',
+          '  object-fit: contain !important;',
+          '  background: #000 !important;',
+          '}'
+        ].join('\n');
+        (document.head || document.documentElement).appendChild(style);
+      }
+      window.__setAndroidPip = function (on) {
+        document.documentElement.classList.toggle('androidPip', !!on);
+        if (document.body) {
+          document.body.classList.toggle('androidPip', !!on);
+          document.body.classList.toggle('playerFullWindow', !!on);
+        }
+        try { if (on) { document.exitFullscreen(); } } catch (e) {}
+        var player = document.querySelector('.ftVideoPlayer');
+        if (player) {
+          player.classList.toggle('fullWindow', !!on);
+        }
+        return true;
+      };
+    })();
+  """.trimIndent()
 }

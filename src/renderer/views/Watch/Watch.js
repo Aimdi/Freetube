@@ -374,7 +374,12 @@ export default defineComponent({
       window.removeEventListener('media-seek', this.mediaSeek)
       android.cancelMediaNotification()
       android.setPictureInPictureState(false, false, 16, 9)
-      document.body.classList.remove('androidPip')
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(false)
+      } else {
+        document.documentElement.classList.remove('androidPip')
+        document.body.classList.remove('androidPip')
+      }
     }
   },
   methods: {

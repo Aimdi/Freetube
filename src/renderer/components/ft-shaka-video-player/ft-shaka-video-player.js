@@ -33,7 +33,7 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureState } from '../../helpers/android/pip'
+import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -355,6 +355,479 @@ export default defineComponent({
       const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
 
       setPictureInPictureState(canAutoEnter, isPlaying, width, height)
+
+      const boxEl = container.value || videoEl
+      if (boxEl) {
+        const box = boxEl.getBoundingClientRect()
+        if (box.width >= 8 && box.height >= 8) {
+          setPictureInPictureSourceRect(box.left, box.top, box.width, box.height)
+        }
+      }
+    }
+
+    // #region android pip canvas mirror
+
+    /*
+      Android system PiP scales the activity window, but Chromium decodes
+      <video> onto a hardware overlay that is not part of that window —
+      the PiP surface shows a black hole where the video is. A 2D canvas
+      *is* a normal compositor texture, so mirroring the frames onto a
+      canvas makes them visible in PiP. Drawing a cross-origin video into
+      a canvas is allowed (only pixel readback taints), and works for
+      every format: legacy, DASH, HLS and SABR.
+    */
+    /** @type {HTMLCanvasElement|null} */
+    let pipMirrorCanvas = null
+    /** @type {(() => void)|null} */
+    let pipMirrorStop = null
+
+    /*
+      Lip-sync compensation: the PiP picture arrives ~100ms late
+      (capture + encode + bridge + decode + draw) while audio plays
+      instantly. Routing the element's audio through a DelayNode and
+      matching the measured frame latency brings lips back in sync.
+      Delay is 0 outside PiP. MediaElementSource has the same CORS
+      requirements as the canvas relay, which is already working.
+    */
+    /** @type {AudioContext|null} */
+    let pipAudioContext = null
+    /** @type {DelayNode|null} */
+    let pipAudioDelay = null
+    /** @type {MediaElementAudioSourceNode|null} */
+    let pipAudioSourceNode = null
+    /** @type {GainNode|null} */
+    let pipAudioGain = null
+    // True end-to-end latency (capture -> drawn on the native surface),
+    // measured through per-frame acks from the native side.
+    let pipFrameLatencyMs = 120
+
+    async function enableAndroidPipAudioSync() {
+      const videoEl = video.value
+      if (!videoEl) {
+        return
+      }
+      try {
+        if (!pipAudioContext) {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)()
+          await ctx.resume()
+          if (ctx.state !== 'running') {
+            await ctx.close()
+            return
+          }
+          const delayNode = ctx.createDelay(1.0)
+          delayNode.delayTime.value = 0
+          const gainNode = ctx.createGain()
+          gainNode.gain.value = 1
+          const source = ctx.createMediaElementSource(videoEl)
+          source.connect(delayNode)
+          delayNode.connect(gainNode)
+          gainNode.connect(ctx.destination)
+          pipAudioContext = ctx
+          pipAudioDelay = delayNode
+          pipAudioSourceNode = source
+          pipAudioGain = gainNode
+        }
+        updateAndroidPipAudioDelay()
+      } catch {
+        // audio keeps playing directly; sync stays as-is
+      }
+    }
+
+    /**
+     * Mutes the speaker route while native stream playback carries the
+     * audio, without muting the element (that would silence the capture).
+     * @param {boolean} muted
+     */
+    function setPipSpeakersMuted(muted) {
+      if (pipAudioContext && pipAudioGain) {
+        try {
+          pipAudioGain.gain.setTargetAtTime(muted ? 0 : 1, pipAudioContext.currentTime, 0.03)
+        } catch {
+          // keep current routing
+        }
+      }
+    }
+
+    function updateAndroidPipAudioDelay() {
+      if (!pipAudioContext || !pipAudioDelay) {
+        return
+      }
+      // measured end-to-end latency + display/vsync margin
+      const target = Math.min(0.4, Math.max(0.05, (pipFrameLatencyMs + 20) / 1000))
+      try {
+        pipAudioDelay.delayTime.setTargetAtTime(target, pipAudioContext.currentTime, 0.1)
+      } catch {
+        // keep previous delay
+      }
+    }
+
+    function disableAndroidPipAudioSync() {
+      if (pipAudioContext && pipAudioDelay) {
+        try {
+          pipAudioDelay.delayTime.setTargetAtTime(0, pipAudioContext.currentTime, 0.05)
+        } catch {
+          // keep previous delay
+        }
+      }
+    }
+
+    function closeAndroidPipAudioSync() {
+      if (pipAudioContext) {
+        try {
+          pipAudioContext.close()
+        } catch {
+          // already closed
+        }
+        pipAudioContext = null
+        pipAudioDelay = null
+        pipAudioSourceNode = null
+        pipAudioGain = null
+      }
+    }
+
+    // #region android pip media stream
+
+    /*
+      Preferred PiP path: hardware-encode the playing audio+video with
+      MediaRecorder and hand the container stream to a native ExoPlayer.
+      Real video pipeline on both ends: smooth frame pacing and perfect
+      A/V sync from container timestamps. Runs ~0.5-1s behind live,
+      which is invisible inside a PiP window. The JPEG frame relay keeps
+      covering the window until the stream renders, and remains the
+      fallback if recording is unsupported or fails.
+    */
+    /** @type {MediaRecorder|null} */
+    let pipStreamRecorder = null
+    /** @type {MediaStreamAudioDestinationNode|null} */
+    let pipStreamAudioDest = null
+
+    function startAndroidPipStream() {
+      if (
+        pipStreamRecorder ||
+        props.format === 'audio' ||
+        typeof MediaRecorder === 'undefined' ||
+        typeof android.sendPipStreamStart !== 'function' ||
+        // audio must come through the Web Audio graph, otherwise the
+        // speakers and the native player would both play sound
+        !pipAudioContext || !pipAudioSourceNode
+      ) {
+        return
+      }
+      const videoEl = video.value
+      if (!videoEl || typeof videoEl.captureStream !== 'function') {
+        return
+      }
+      try {
+        const captured = videoEl.captureStream()
+        const videoTrack = captured.getVideoTracks()[0]
+        if (!videoTrack) {
+          return
+        }
+        const tracks = [videoTrack]
+        const audioDest = pipAudioContext.createMediaStreamDestination()
+        pipAudioSourceNode.connect(audioDest)
+        pipStreamAudioDest = audioDest
+        const audioTrack = audioDest.stream.getAudioTracks()[0]
+        if (audioTrack) {
+          tracks.push(audioTrack)
+        }
+
+        const mimeType = [
+          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+          'video/webm;codecs=vp8,opus',
+          'video/webm'
+        ].find(type => MediaRecorder.isTypeSupported(type))
+        if (!mimeType) {
+          stopAndroidPipStream()
+          return
+        }
+
+        const recorder = new MediaRecorder(new MediaStream(tracks), {
+          mimeType,
+          videoBitsPerSecond: 2_500_000,
+          audioBitsPerSecond: 128_000
+        })
+
+        // chunks must reach the native demuxer in order
+        let chunkChain = Promise.resolve()
+        recorder.ondataavailable = (event) => {
+          if (!event.data || event.data.size === 0 || pipStreamRecorder !== recorder) {
+            return
+          }
+          chunkChain = chunkChain
+            .then(() => event.data.arrayBuffer())
+            .then((arrayBuffer) => {
+              if (pipStreamRecorder !== recorder) {
+                return
+              }
+              const bytes = new Uint8Array(arrayBuffer)
+              let binary = ''
+              for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+              }
+              android.sendPipStreamChunk(btoa(binary))
+            })
+            .catch(() => {
+              stopAndroidPipStream()
+            })
+        }
+        recorder.onerror = () => {
+          stopAndroidPipStream()
+        }
+
+        android.sendPipStreamStart(mimeType)
+        recorder.start(250)
+        pipStreamRecorder = recorder
+      } catch {
+        stopAndroidPipStream()
+      }
+    }
+
+    function stopAndroidPipStream() {
+      const recorder = pipStreamRecorder
+      pipStreamRecorder = null
+      if (recorder) {
+        try {
+          recorder.stop()
+        } catch {
+          // already stopped
+        }
+      }
+      if (pipStreamAudioDest && pipAudioSourceNode) {
+        try {
+          pipAudioSourceNode.disconnect(pipStreamAudioDest)
+        } catch {
+          // already disconnected
+        }
+      }
+      pipStreamAudioDest = null
+      if (typeof android.sendPipStreamEnd === 'function') {
+        try {
+          android.sendPipStreamEnd()
+        } catch {
+          // native side already closed
+        }
+      }
+    }
+
+    function handlePipStreamRendering() {
+      // native player has the picture and the audio: silence the
+      // speaker route and stop the JPEG relay
+      setPipSpeakersMuted(true)
+      disableAndroidPipAudioSync()
+      stopAndroidPipMirror()
+    }
+
+    function handlePipStreamFailed() {
+      stopAndroidPipStream()
+      setPipSpeakersMuted(false)
+      startAndroidPipMirror()
+      enableAndroidPipAudioSync()
+    }
+
+    // #endregion android pip media stream
+
+    function startAndroidPipMirror() {
+      const videoEl = video.value
+      const containerEl = container.value
+      if (!videoEl || !containerEl || pipMirrorCanvas) {
+        return
+      }
+
+      const canvas = document.createElement('canvas')
+      canvas.id = 'ftAndroidPipCanvas'
+      canvas.style.cssText =
+        'position:absolute;inset:0;width:100%;height:100%;z-index:2147483647;' +
+        'background:#000;object-fit:contain;display:block;pointer-events:none;'
+      const ctx = canvas.getContext('2d')
+      containerEl.appendChild(canvas)
+      pipMirrorCanvas = canvas
+
+      let stopped = false
+      let vfcHandle = null
+      let relayBusy = false
+      let lastCaptureTime = 0
+      let ackCount = 0
+      // Closed-loop controller state: starts conservative and adapts to
+      // whatever this device can actually sustain.
+      let relayQuality = 0.5
+      let relayResolutionScale = 0.8
+
+      const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
+      const canRelayFrames = typeof android.sendPipFrame === 'function'
+
+      window.__ftPipMirrorActive = true
+
+      /*
+        Per-frame ack from the native side after the frame is actually
+        drawn. Gives the TRUE end-to-end latency, which drives both the
+        audio delay line and the quality/resolution controller:
+        overloaded -> smaller/cheaper frames; headroom -> sharper frames.
+      */
+      window.__ftPipFrameShown = (sentAt) => {
+        if (stopped || typeof sentAt !== 'number') {
+          return
+        }
+        const sample = performance.now() - sentAt
+        if (sample <= 0 || sample > 2000) {
+          return
+        }
+        pipFrameLatencyMs = pipFrameLatencyMs * 0.8 + sample * 0.2
+        ackCount++
+        if (ackCount % 15 === 0) {
+          if (pipFrameLatencyMs > 110) {
+            relayQuality = Math.max(0.4, relayQuality - 0.05)
+            relayResolutionScale = Math.max(0.6, relayResolutionScale - 0.1)
+          } else if (pipFrameLatencyMs < 60) {
+            relayQuality = Math.min(0.7, relayQuality + 0.05)
+            relayResolutionScale = Math.min(1, relayResolutionScale + 0.05)
+          }
+          updateAndroidPipAudioDelay()
+        }
+      }
+
+      const paintFrame = () => {
+        const videoWidth = videoEl.videoWidth
+        const videoHeight = videoEl.videoHeight
+        if (videoWidth <= 0 || videoHeight <= 0) {
+          return
+        }
+        // Pace to ~30fps regardless of which clock fired
+        const now = performance.now()
+        if (now - lastCaptureTime < 30) {
+          return
+        }
+        lastCaptureTime = now
+
+        // Base target: the PiP window's real width (pushed by the native
+        // side), scaled down by the controller when the device is slow.
+        const windowWidth = Math.min(600, Math.max(320, window.__ftPipTargetWidth || 480))
+        const targetWidth = Math.max(280, Math.round(windowWidth * relayResolutionScale))
+        const scale = Math.min(1, targetWidth / videoWidth)
+        const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
+        const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
+        if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+          canvas.width = canvasWidth
+          canvas.height = canvasHeight
+        }
+        try {
+          ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
+        } catch {
+          // ignore decoder hiccups; next frame will draw
+          return
+        }
+
+        /*
+          Relay the frame to the native TextureView. The WebView's own
+          surface is not composited into the PiP window on all devices,
+          but native views always are.
+
+          toBlob encodes asynchronously off the main thread. Strictly one
+          frame in flight — when encoding can't keep up, frames are
+          dropped, never queued, so the PiP image stays in real time.
+          MSE-fed video never taints the canvas and the legacy <video>
+          uses crossorigin="anonymous".
+        */
+        if (canRelayFrames && !relayBusy) {
+          relayBusy = true
+          const captureStart = performance.now()
+          try {
+            canvas.toBlob((blob) => {
+              if (!blob || stopped) {
+                relayBusy = false
+                return
+              }
+              const reader = new FileReader()
+              reader.onloadend = () => {
+                relayBusy = false
+                if (!stopped && typeof reader.result === 'string') {
+                  try {
+                    android.sendPipFrame(reader.result, captureStart)
+                  } catch {
+                    // bridge hiccup; next frame will arrive shortly
+                  }
+                }
+              }
+              reader.onerror = () => {
+                relayBusy = false
+              }
+              reader.readAsDataURL(blob)
+            }, 'image/jpeg', relayQuality)
+          } catch {
+            // tainted canvas; the in-page mirror keeps running
+            relayBusy = false
+          }
+        }
+      }
+
+      const vfcLoop = () => {
+        if (stopped) {
+          return
+        }
+        paintFrame()
+        vfcHandle = videoEl.requestVideoFrameCallback(vfcLoop)
+      }
+
+      /*
+        Capture clocks, most reliable first:
+        1. The native activity ticks window.__ftPipCapture every 33ms via
+           evaluateJavascript — immune to the renderer's background timer
+           throttling while the activity is paused in PiP.
+        2. An in-page interval as fallback (throttled on some devices).
+        3. requestVideoFrameCallback adds frame-exact precision when the
+           compositor still services it.
+        The 30ms minimum gap in paintFrame coalesces all three.
+      */
+      window.__ftPipCapture = () => {
+        if (!stopped) {
+          paintFrame()
+        }
+      }
+
+      const captureInterval = setInterval(() => {
+        if (!stopped) {
+          paintFrame()
+        }
+      }, 33)
+
+      if (supportsVfc) {
+        vfcLoop()
+      } else {
+        paintFrame()
+      }
+
+      pipMirrorStop = () => {
+        stopped = true
+        window.__ftPipMirrorActive = false
+        delete window.__ftPipCapture
+        delete window.__ftPipFrameShown
+        clearInterval(captureInterval)
+        if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
+          videoEl.cancelVideoFrameCallback(vfcHandle)
+        }
+      }
+    }
+
+    function stopAndroidPipMirror() {
+      if (pipMirrorStop) {
+        pipMirrorStop()
+        pipMirrorStop = null
+      }
+      if (pipMirrorCanvas) {
+        pipMirrorCanvas.remove()
+        pipMirrorCanvas = null
+      }
+    }
+
+    // #endregion android pip canvas mirror
+
+    function setAndroidPipLayout(enabled) {
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(enabled)
+        return
+      }
+      document.documentElement.classList.toggle('androidPip', enabled)
+      document.body.classList.toggle('androidPip', enabled)
     }
 
     function enterAndroidPictureInPicture() {
@@ -368,13 +841,32 @@ export default defineComponent({
         // pass
       }
 
-      document.body.classList.add('androidPip')
+      setAndroidPipLayout(true)
       syncAndroidPipState()
+      beginAndroidPipSession()
       enterPictureInPicture()
     }
 
+    async function beginAndroidPipSession() {
+      window.__ftPipStreamRendering = handlePipStreamRendering
+      window.__ftPipStreamFailed = handlePipStreamFailed
+      startAndroidPipMirror()
+      await enableAndroidPipAudioSync()
+      startAndroidPipStream()
+    }
+
+    function endAndroidPipSession() {
+      delete window.__ftPipStreamRendering
+      delete window.__ftPipStreamFailed
+      stopAndroidPipStream()
+      stopAndroidPipMirror()
+      disableAndroidPipAudioSync()
+      setPipSpeakersMuted(false)
+    }
+
     function handleAndroidPipEnter() {
-      document.body.classList.add('androidPip')
+      setAndroidPipLayout(true)
+      beginAndroidPipSession()
       try {
         document.exitFullscreen()
       } catch {
@@ -383,7 +875,8 @@ export default defineComponent({
     }
 
     function handleAndroidPipExit() {
-      document.body.classList.remove('androidPip')
+      endAndroidPipSession()
+      setAndroidPipLayout(false)
     }
 
     if (process.env.IS_ANDROID) {
@@ -1376,6 +1869,10 @@ export default defineComponent({
 
         videoElementWidth.value = video_.clientWidth * devicePixelRatio
         videoElementHeight.value = video_.clientHeight * devicePixelRatio
+
+        if (process.env.IS_ANDROID) {
+          syncAndroidPipState()
+        }
       }
     })
 
@@ -2878,6 +3375,15 @@ export default defineComponent({
     onMounted(async () => {
       const videoElement = video.value
       if (process.env.IS_ANDROID) {
+        // Keep Chromium from promoting the video to a hardware overlay
+        // (SurfaceView/SurfaceControl plane). Overlay frames are invisible
+        // to Android system PiP *and* unreadable by canvas.drawImage —
+        // both showed a black window. A non-axis-aligned transform plus a
+        // filter forces the compositor to keep frames in a regular
+        // GPU texture. Visually imperceptible.
+        videoElement.style.transform = 'rotateZ(0.02deg)'
+        videoElement.style.filter = 'brightness(1.001)'
+
         window.addEventListener('media-play', mediaPlay)
         window.addEventListener('media-pause', mediaPause)
         videoElement.addEventListener('play', () => {
@@ -3432,6 +3938,8 @@ export default defineComponent({
       window.removeEventListener('pip-exit', handleAndroidPipExit)
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
+        endAndroidPipSession()
+        closeAndroidPipAudioSync()
         setPictureInPictureState(false, false, 16, 9)
       }
     })

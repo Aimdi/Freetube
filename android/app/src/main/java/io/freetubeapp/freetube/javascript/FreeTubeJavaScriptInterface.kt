@@ -9,6 +9,7 @@ import androidx.documentfile.provider.DocumentFile
 import io.freetubeapp.freetube.MainActivity
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.helpers.MediaSessionFacade
+import io.freetubeapp.freetube.helpers.PipStreamBuffer
 import io.freetubeapp.freetube.helpers.Promise
 import io.freetubeapp.freetube.helpers.WriteMode
 import io.freetubeapp.freetube.helpers.getDataDirectory
@@ -23,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
 import java.io.File
 import java.nio.charset.Charset
+import kotlin.concurrent.thread
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -423,6 +425,29 @@ class FreeTubeJavaScriptInterface(
   }
 
   /**
+   * Video bounds in CSS pixels, used as the PiP source-rect hint so the
+   * system animates from the player instead of the whole watch page.
+   */
+  @JavascriptInterface
+  fun setPictureInPictureSourceRect(left: Double, top: Double, width: Double, height: Double) {
+    if (width < 8 || height < 8) {
+      return
+    }
+    context.runOnUiThread {
+      val loc = IntArray(2)
+      webView.getLocationOnScreen(loc)
+      val scale = webView.scale.toDouble()
+      context.state.pictureInPictureSourceRect = android.graphics.Rect(
+        (loc[0] + left * scale).toInt(),
+        (loc[1] + top * scale).toInt(),
+        (loc[0] + (left + width) * scale).toInt(),
+        (loc[1] + (top + height) * scale).toInt()
+      )
+      (context as? MainActivity)?.applyPictureInPictureParams()
+    }
+  }
+
+  /**
    * Enters Android system Picture-in-Picture if the device supports it.
    */
   @JavascriptInterface
@@ -435,6 +460,112 @@ class FreeTubeJavaScriptInterface(
   @JavascriptInterface
   fun isInPictureInPicture(): Boolean {
     return context.state.isInPictureInPicture
+  }
+
+  /*
+    Latest-frame-wins handoff, decoded off the JavaBridge thread.
+
+    Decoding inline queued every incoming frame behind slower decodes, so
+    the PiP image fell further and further behind real time — playing back
+    in slow motion. A single pending slot plus a dedicated decoder thread
+    drops stale frames instead of delaying fresh ones, so the PiP window
+    always shows the newest frame.
+  */
+  private val pipFrameLock = Object()
+  private var pipFramePending: String? = null
+  private var pipFrameCaptureId = 0.0
+  private var pipFrameDecoderStarted = false
+  // Rotating pool so ~30fps decoding reuses pixel buffers instead of
+  // allocating a new bitmap per frame (avoids constant GC pauses).
+  private val pipFramePool = arrayOfNulls<android.graphics.Bitmap>(3)
+  private var pipFramePoolIndex = 0
+
+  /**
+   * The page hardware-encodes the playing audio+video with MediaRecorder
+   * and streams the container here; a native ExoPlayer plays it in the
+   * PiP window with proper frame pacing and built-in A/V sync.
+   */
+  @JavascriptInterface
+  fun sendPipStreamStart(mimeType: String) {
+    context.runOnUiThread {
+      (context as? MainActivity)?.onPipStreamStart(mimeType)
+    }
+  }
+
+  @JavascriptInterface
+  fun sendPipStreamChunk(base64Data: String) {
+    try {
+      PipStreamBuffer.append(android.util.Base64.decode(base64Data, android.util.Base64.DEFAULT))
+      (context as? MainActivity)?.onPipStreamData()
+    } catch (_: Exception) {
+      // corrupt chunk; the extractor will resync or error out to fallback
+    }
+  }
+
+  @JavascriptInterface
+  fun sendPipStreamEnd() {
+    PipStreamBuffer.close()
+  }
+
+  /**
+   * Receives a JPEG data-URL of the current video frame while in PiP.
+   * The WebView surface is not reliably composited into the system PiP
+   * window, but native views are, so frames go to a TextureView.
+   * @param captureId JS timestamp echoed back after the draw so the page
+   * can measure true end-to-end latency
+   */
+  @JavascriptInterface
+  fun sendPipFrame(dataUrl: String, captureId: Double) {
+    synchronized(pipFrameLock) {
+      pipFramePending = dataUrl
+      pipFrameCaptureId = captureId
+      if (!pipFrameDecoderStarted) {
+        pipFrameDecoderStarted = true
+        thread(isDaemon = true, name = "pip-frame-decoder") { pipFrameDecodeLoop() }
+      }
+      pipFrameLock.notify()
+    }
+  }
+
+  private fun pipFrameDecodeLoop() {
+    while (true) {
+      var captureId = 0.0
+      val dataUrl = synchronized(pipFrameLock) {
+        while (pipFramePending == null) {
+          pipFrameLock.wait()
+        }
+        val pending = pipFramePending!!
+        captureId = pipFrameCaptureId
+        pipFramePending = null
+        pending
+      }
+      decodePipFrame(dataUrl, captureId)
+    }
+  }
+
+  private fun decodePipFrame(dataUrl: String, captureId: Double) {
+    val comma = dataUrl.indexOf(',')
+    if (comma < 0) {
+      return
+    }
+    try {
+      val bytes = android.util.Base64.decode(dataUrl.substring(comma + 1), android.util.Base64.DEFAULT)
+      val options = android.graphics.BitmapFactory.Options()
+      options.inMutable = true
+      options.inBitmap = pipFramePool[pipFramePoolIndex]
+      val bitmap = try {
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+      } catch (_: IllegalArgumentException) {
+        // reuse failed (frame size changed); decode fresh
+        options.inBitmap = null
+        android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+      } ?: return
+      pipFramePool[pipFramePoolIndex] = bitmap
+      pipFramePoolIndex = (pipFramePoolIndex + 1) % pipFramePool.size
+      (context as? MainActivity)?.onPipFrame(bitmap, captureId)
+    } catch (_: Exception) {
+      // corrupt frame; the next one will arrive shortly
+    }
   }
 
   // endregion
