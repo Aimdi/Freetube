@@ -487,9 +487,22 @@ export default defineComponent({
         vfcHandle = videoEl.requestVideoFrameCallback(vfcLoop)
       }
 
-      // Steady capture clock: video-frame callbacks can be throttled or
-      // stalled while the activity is paused in PiP, so a timer drives
-      // the capture and the frame callback only adds precision on top.
+      /*
+        Capture clocks, most reliable first:
+        1. The native activity ticks window.__ftPipCapture every 33ms via
+           evaluateJavascript — immune to the renderer's background timer
+           throttling while the activity is paused in PiP.
+        2. An in-page interval as fallback (throttled on some devices).
+        3. requestVideoFrameCallback adds frame-exact precision when the
+           compositor still services it.
+        The 30ms minimum gap in paintFrame coalesces all three.
+      */
+      window.__ftPipCapture = () => {
+        if (!stopped) {
+          paintFrame()
+        }
+      }
+
       const captureInterval = setInterval(() => {
         if (!stopped) {
           paintFrame()
@@ -505,6 +518,7 @@ export default defineComponent({
       pipMirrorStop = () => {
         stopped = true
         window.__ftPipMirrorActive = false
+        delete window.__ftPipCapture
         clearInterval(captureInterval)
         if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
           videoEl.cancelVideoFrameCallback(vfcHandle)

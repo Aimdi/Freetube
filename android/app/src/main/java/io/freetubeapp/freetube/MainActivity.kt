@@ -4,17 +4,19 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.TextView
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
@@ -32,11 +34,27 @@ class MainActivity: FreeTubeActivity() {
     }
   private lateinit var webView: FreeTubeWebView
   private lateinit var pipOverlay: FrameLayout
-  private lateinit var pipImage: ImageView
+  private lateinit var pipTexture: TextureView
   private lateinit var pipStatus: TextView
   private val mainHandler = Handler(Looper.getMainLooper())
+  private val pipFramePaint = Paint(Paint.FILTER_BITMAP_FLAG)
   private var lastPipFrameAt = 0L
   private var pipEnterInProgress = false
+
+  /**
+   * Ticks the in-page capture from the native side. Renderer timers are
+   * throttled while the activity is paused in PiP; evaluateJavascript
+   * injections are not.
+   */
+  private val pipCaptureClock = object : Runnable {
+    override fun run() {
+      if (!isInPictureInPictureMode) {
+        return
+      }
+      webView.evaluateJavascript("window.__ftPipCapture && window.__ftPipCapture()", null)
+      mainHandler.postDelayed(this, 33)
+    }
+  }
 
   private val pipStatusPoller = object : Runnable {
     override fun run() {
@@ -88,13 +106,14 @@ class MainActivity: FreeTubeActivity() {
 
       // Native PiP surface: system PiP always composites native views,
       // even when the WebView's own surface goes missing or black.
-      pipImage = ImageView(this@MainActivity).apply {
+      // A TextureView lets the frame-decoder thread draw directly via
+      // lockCanvas, skipping the (busy) UI thread for every frame.
+      pipTexture = TextureView(this@MainActivity).apply {
         layoutParams = FrameLayout.LayoutParams(
           ViewGroup.LayoutParams.MATCH_PARENT,
           ViewGroup.LayoutParams.MATCH_PARENT
         )
-        scaleType = ImageView.ScaleType.FIT_CENTER
-        setBackgroundColor(Color.BLACK)
+        isOpaque = true
       }
       pipStatus = TextView(this@MainActivity).apply {
         layoutParams = FrameLayout.LayoutParams(
@@ -116,7 +135,7 @@ class MainActivity: FreeTubeActivity() {
         setBackgroundColor(Color.BLACK)
         visibility = View.GONE
         isClickable = false
-        addView(pipImage)
+        addView(pipTexture)
         addView(pipStatus)
       }
       root.addView(pipOverlay)
@@ -198,17 +217,18 @@ class MainActivity: FreeTubeActivity() {
       cropPlayerForPictureInPicture()
       webView.dispatchEvent("pip-enter")
       lastPipFrameAt = 0L
-      pipImage.setImageDrawable(null)
       pipStatus.text = "waiting for frames…"
       pipStatus.visibility = View.VISIBLE
       pipOverlay.visibility = View.VISIBLE
       pipOverlay.bringToFront()
+      mainHandler.removeCallbacks(pipCaptureClock)
+      mainHandler.post(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
       mainHandler.postDelayed(pipStatusPoller, 1000)
     } else {
+      mainHandler.removeCallbacks(pipCaptureClock)
       mainHandler.removeCallbacks(pipStatusPoller)
       pipOverlay.visibility = View.GONE
-      pipImage.setImageDrawable(null)
       pipStatus.visibility = View.GONE
       webView.setAndroidPipMode(false)
       webView.setBackgroundColor(Color.TRANSPARENT)
@@ -219,12 +239,44 @@ class MainActivity: FreeTubeActivity() {
     }
   }
 
+  /**
+   * Called from the frame-decoder thread. Draws straight onto the
+   * TextureView surface so no per-frame work queues on the UI thread.
+   */
   fun onPipFrame(bitmap: Bitmap) {
-    runOnUiThread {
-      lastPipFrameAt = SystemClock.elapsedRealtime()
-      if (isInPictureInPictureMode) {
-        pipImage.setImageBitmap(bitmap)
-        if (pipStatus.visibility == View.VISIBLE) {
+    lastPipFrameAt = SystemClock.elapsedRealtime()
+    if (!isInPictureInPictureMode || !pipTexture.isAvailable) {
+      return
+    }
+    val canvas = try {
+      pipTexture.lockCanvas() ?: return
+    } catch (_: IllegalStateException) {
+      return
+    }
+    try {
+      canvas.drawColor(Color.BLACK)
+      val canvasWidth = canvas.width.toFloat()
+      val canvasHeight = canvas.height.toFloat()
+      val bitmapWidth = bitmap.width.toFloat()
+      val bitmapHeight = bitmap.height.toFloat()
+      if (bitmapWidth > 0 && bitmapHeight > 0) {
+        val scale = minOf(canvasWidth / bitmapWidth, canvasHeight / bitmapHeight)
+        val drawWidth = bitmapWidth * scale
+        val drawHeight = bitmapHeight * scale
+        val left = (canvasWidth - drawWidth) / 2f
+        val top = (canvasHeight - drawHeight) / 2f
+        canvas.drawBitmap(bitmap, null, RectF(left, top, left + drawWidth, top + drawHeight), pipFramePaint)
+      }
+    } finally {
+      try {
+        pipTexture.unlockCanvasAndPost(canvas)
+      } catch (_: IllegalStateException) {
+        // surface went away mid-draw (PiP dismissed)
+      }
+    }
+    if (pipStatus.visibility == View.VISIBLE) {
+      runOnUiThread {
+        if (SystemClock.elapsedRealtime() - lastPipFrameAt < 2000) {
           pipStatus.visibility = View.GONE
         }
       }
