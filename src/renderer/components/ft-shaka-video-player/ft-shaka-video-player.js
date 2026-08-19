@@ -33,7 +33,7 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
+import { enterPictureInPicture, isInPictureInPicture, setNativePipMedia, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -344,6 +344,39 @@ export default defineComponent({
       return { width, height }
     }
 
+    function getNativePipMedia() {
+      if (props.format === 'legacy' && activeLegacyFormat.value?.url) {
+        return {
+          url: activeLegacyFormat.value.url,
+          mimeType: activeLegacyFormat.value.mimeType || 'video/mp4'
+        }
+      }
+
+      const manifest = props.manifestSrc
+      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
+        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
+          return {
+            url: manifest,
+            mimeType: props.manifestMimeType || 'application/dash+xml'
+          }
+        }
+      }
+
+      const formats = (props.legacyFormats || [])
+        .filter(format => format.url)
+        .slice()
+        .sort((a, b) => (b.height || 0) - (a.height || 0))
+
+      if (formats[0]) {
+        return {
+          url: formats[0].url,
+          mimeType: formats[0].mimeType || 'video/mp4'
+        }
+      }
+
+      return null
+    }
+
     function syncAndroidPipState() {
       if (!process.env.IS_ANDROID) {
         return
@@ -351,10 +384,10 @@ export default defineComponent({
 
       const videoEl = video.value
       const { width, height } = getAndroidPipAspectRatio()
-      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended)
-      const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
+      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended && !window.__androidNativePip)
+      const canAutoEnter = (isPlaying || window.__androidNativePip) && props.format !== 'audio' && autoEnterPipOnLeave.value
 
-      setPictureInPictureState(canAutoEnter, isPlaying, width, height)
+      setPictureInPictureState(canAutoEnter, isPlaying || !!window.__androidNativePip, width, height)
 
       const boxEl = container.value || videoEl
       if (boxEl) {
@@ -363,6 +396,14 @@ export default defineComponent({
           setPictureInPictureSourceRect(box.left, box.top, box.width, box.height)
         }
       }
+
+      const nativeMedia = props.format === 'audio' ? null : getNativePipMedia()
+      setNativePipMedia(
+        nativeMedia?.url || null,
+        nativeMedia?.mimeType || null,
+        Math.floor((videoEl?.currentTime || 0) * 1000),
+        props.thumbnail || null
+      )
     }
 
     function setAndroidPipLayout(enabled) {
@@ -2889,9 +2930,15 @@ export default defineComponent({
     const initLoadWaitTimeToastAC = new AbortController()
 
     const mediaPlay = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.play()
     }
     const mediaPause = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.pause()
     }
     let updateBufferInterval = null
@@ -2902,11 +2949,17 @@ export default defineComponent({
         window.addEventListener('media-play', mediaPlay)
         window.addEventListener('media-pause', mediaPause)
         videoElement.addEventListener('play', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           android.enableKeepScreenOn()
           updateMediaSessionState(STATE_PLAYING)
           syncAndroidPipState()
         })
         videoElement.addEventListener('pause', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           android.disableKeepScreenOn()
           updateMediaSessionState(STATE_PAUSED)
           syncAndroidPipState()
@@ -2919,6 +2972,9 @@ export default defineComponent({
         })
         videoElement.addEventListener('timeupdate', () => {
           updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
+          if (!window.__androidNativePip) {
+            syncAndroidPipState()
+          }
         })
         updateBufferInterval = setInterval(() => {
           if (videoElement.buffered.length == 0) {

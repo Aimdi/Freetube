@@ -16,5 +16,10 @@ data class ApplicationState(
   var pictureInPictureAspectHeight: Int = 9,
   var pictureInPicturePlaying: Boolean = false,
   var pictureInPictureSourceRect: Rect? = null,
-  var isInPictureInPicture: Boolean = false
+  var isInPictureInPicture: Boolean = false,
+  var nativePipUrl: String? = null,
+  var nativePipMimeType: String? = null,
+  var nativePipPositionMs: Long = 0,
+  var nativePipThumbnailUrl: String? = null,
+  var usingNativePip: Boolean = false
 )

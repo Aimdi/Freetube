@@ -25,6 +25,19 @@ export function setPictureInPictureSourceRect(left, top, width, height) {
 }
 
 /**
+ * Registers a URL the native TextureView player can play inside system PiP.
+ * @param {string|null} url
+ * @param {string|null} mimeType
+ * @param {number} positionMs
+ * @param {string|null} thumbnailUrl
+ */
+export function setNativePipMedia(url, mimeType, positionMs, thumbnailUrl) {
+  if (typeof android.setNativePipMedia === 'function') {
+    android.setNativePipMedia(url, mimeType, positionMs, thumbnailUrl)
+  }
+}
+
+/**
  * Asks Android to enter system Picture-in-Picture immediately.
  */
 export function enterPictureInPicture() {

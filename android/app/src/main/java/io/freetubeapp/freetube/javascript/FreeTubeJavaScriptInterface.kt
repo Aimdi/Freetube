@@ -37,7 +37,9 @@ class FreeTubeJavaScriptInterface(
     context,
     "media_controls",
     { event ->
-      webView.dispatchEvent(event)
+      if ((context as? MainActivity)?.handleNativePipMediaEvent(event) != true) {
+        webView.dispatchEvent(event)
+      }
     },
     { position ->
       webView.dispatchEvent("media-seek", "position", position)
@@ -458,6 +460,28 @@ class FreeTubeJavaScriptInterface(
   @JavascriptInterface
   fun isInPictureInPicture(): Boolean {
     return context.state.isInPictureInPicture
+  }
+
+  /**
+   * Registers a stream URL that a native TextureView player can play in PiP.
+   * WebView HTML5 video is not composited into the system PiP window.
+   */
+  @JavascriptInterface
+  fun setNativePipMedia(
+    url: String?,
+    mimeType: String?,
+    positionMs: Double,
+    thumbnailUrl: String?
+  ) {
+    context.runOnUiThread {
+      context.state.nativePipUrl = url?.takeIf { it.isNotBlank() }
+      context.state.nativePipMimeType = mimeType
+      if (positionMs >= 0) {
+        context.state.nativePipPositionMs = positionMs.toLong()
+      }
+      context.state.nativePipThumbnailUrl = thumbnailUrl
+      (context as? MainActivity)?.onNativePipMediaUpdated()
+    }
   }
 
   // endregion

@@ -5,9 +5,11 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewGroup
 import android.view.WindowManager
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
+import io.freetubeapp.freetube.helpers.NativePipPlayer
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
 import io.freetubeapp.freetube.helpers.isDarkMode
 import io.freetubeapp.freetube.helpers.toYtUrl
@@ -21,6 +23,7 @@ class MainActivity: FreeTubeActivity() {
       return Intent(this, KeepAliveService::class.java)
     }
   private lateinit var webView: FreeTubeWebView
+  private lateinit var nativePipPlayer: NativePipPlayer
   private var pipEnterInProgress = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -48,6 +51,8 @@ class MainActivity: FreeTubeActivity() {
         }
       }
       root.addView(webView)
+      nativePipPlayer = NativePipPlayer(this@MainActivity)
+      nativePipPlayer.attachTo(root as ViewGroup)
     }
 
     // this keeps android from shutting off the app to conserve battery
@@ -103,6 +108,7 @@ class MainActivity: FreeTubeActivity() {
     super.onUserLeaveHint()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       cropPlayerForPictureInPicture()
+      startNativePipPlayback()
       return
     }
     enterPictureInPictureModeIfPossible(requireAutoEnter = true)
@@ -122,11 +128,11 @@ class MainActivity: FreeTubeActivity() {
     pipEnterInProgress = false
     if (isInPictureInPictureMode) {
       webView.setBackgroundColor(Color.BLACK)
-      // PiP shows the live activity. Crop after enter so the floating
-      // window is the video, not the whole watch page.
       cropPlayerForPictureInPicture()
+      startNativePipPlayback()
       webView.dispatchEvent("pip-enter")
     } else {
+      stopNativePipPlayback(resumeWebView = !state.paused)
       webView.setAndroidPipMode(false)
       webView.setBackgroundColor(Color.TRANSPARENT)
       webView.dispatchEvent("pip-exit")
@@ -162,15 +168,94 @@ class MainActivity: FreeTubeActivity() {
     // or enterPictureInPictureMode() will run after onPause and fail.
     if (requireAutoEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       cropPlayerForPictureInPicture()
+      startNativePipPlayback()
       return true
     }
     pipEnterInProgress = true
+    startNativePipPlayback()
     cropPlayerForPictureInPicture {
       webView.post {
         enterPictureInPictureNow()
       }
     }
     return true
+  }
+
+  /**
+   * @return true when play/pause was handled by the native TextureView player
+   */
+  fun handleNativePipMediaEvent(event: String): Boolean {
+    if (!state.usingNativePip) {
+      return false
+    }
+    return when (event) {
+      "media-play" -> {
+        nativePipPlayer.play()
+        state.pictureInPicturePlaying = true
+        applyPictureInPictureParams()
+        true
+      }
+      "media-pause" -> {
+        nativePipPlayer.pause()
+        state.pictureInPicturePlaying = false
+        applyPictureInPictureParams()
+        true
+      }
+      else -> false
+    }
+  }
+
+  fun onNativePipMediaUpdated() {
+    val url = state.nativePipUrl ?: return
+    if ((state.usingNativePip || isInPictureInPictureMode) && url != nativePipPlayer.lastUrl) {
+      startNativePipPlayback()
+    }
+  }
+
+  private fun startNativePipPlayback() {
+    val url = state.nativePipUrl
+    if (url.isNullOrBlank()) {
+      nativePipPlayer.showPosterOnly(state.nativePipThumbnailUrl)
+      return
+    }
+    if (state.usingNativePip && nativePipPlayer.lastUrl == url) {
+      return
+    }
+    nativePipPlayer.start(
+      url = url,
+      mimeType = state.nativePipMimeType,
+      positionMs = state.nativePipPositionMs,
+      thumbnailUrl = state.nativePipThumbnailUrl,
+      userAgent = webView.settings.userAgentString,
+      playWhenReady = state.pictureInPicturePlaying || !state.paused,
+      onError = {
+        // Keep the poster visible; WebView audio can continue in the background.
+        webView.evaluateJavascript("window.__androidNativePip = false", null)
+      }
+    )
+    state.usingNativePip = true
+    webView.evaluateJavascript(
+      "window.__androidNativePip = true; var v = document.querySelector('video.player'); if (v) { v.pause(); }",
+      null
+    )
+  }
+
+  private fun stopNativePipPlayback(resumeWebView: Boolean) {
+    if (!state.usingNativePip && nativePipPlayer.lastUrl == null) {
+      return
+    }
+    val positionMs = nativePipPlayer.positionMs
+    if (positionMs > 0) {
+      state.nativePipPositionMs = positionMs
+    }
+    nativePipPlayer.stop()
+    state.usingNativePip = false
+    val seconds = state.nativePipPositionMs / 1000.0
+    val play = if (resumeWebView) ".play()" else ""
+    webView.evaluateJavascript(
+      "window.__androidNativePip = false; var v = document.querySelector('video.player'); if (v) { v.currentTime = $seconds; v$play; }",
+      null
+    )
   }
 
   private fun cropPlayerForPictureInPicture(after: (() -> Unit)? = null) {
@@ -227,6 +312,9 @@ class MainActivity: FreeTubeActivity() {
     stopService(keepGoingService)
     // cancel media notification (if there is one)
     webView.jsInterface.cancelMediaNotification()
+    if (::nativePipPlayer.isInitialized) {
+      nativePipPlayer.release()
+    }
     // clean up the web view
     webView.destroy()
     // call `super`
