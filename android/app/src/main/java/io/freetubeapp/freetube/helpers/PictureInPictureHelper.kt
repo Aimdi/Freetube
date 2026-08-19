@@ -104,6 +104,16 @@ object PictureInPictureHelper {
         var style = document.createElement('style');
         style.id = 'android-pip-style';
         style.textContent = [
+          /*
+            Block hardware-overlay promotion for all videos. Overlay planes
+            are outside the window Android PiP scales (black hole) and their
+            frames cannot be read by canvas.drawImage. The tiny rotation +
+            filter force the regular composited-texture path.
+          */
+          'video {',
+          '  transform: rotateZ(0.02deg) !important;',
+          '  filter: brightness(1.001) !important;',
+          '}',
           'html.androidPip, html.androidPip body {',
           '  margin: 0 !important;',
           '  padding: 0 !important;',

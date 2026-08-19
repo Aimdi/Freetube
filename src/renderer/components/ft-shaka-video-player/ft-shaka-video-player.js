@@ -403,27 +403,44 @@ export default defineComponent({
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
 
-      const draw = () => {
+      const paintFrame = () => {
+        const videoWidth = videoEl.videoWidth
+        const videoHeight = videoEl.videoHeight
+        if (videoWidth <= 0 || videoHeight <= 0) {
+          return
+        }
+        // The PiP window is small; capping the buffer keeps drawImage cheap
+        const scale = Math.min(1, 854 / videoWidth)
+        const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
+        const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
+        if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
+          canvas.width = canvasWidth
+          canvas.height = canvasHeight
+        }
+        // Dark background instead of pure black so a failed drawImage is
+        // distinguishable from a dead canvas.
+        ctx.fillStyle = '#181818'
+        ctx.fillRect(0, 0, canvasWidth, canvasHeight)
+        try {
+          ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
+        } catch {
+          // ignore decoder hiccups; next frame will draw
+        }
+        // Progress indicator (also proves the canvas is alive in PiP)
+        const time = videoEl.currentTime || 0
+        const minutes = Math.floor(time / 60)
+        const seconds = Math.floor(time % 60).toString().padStart(2, '0')
+        const fontSize = Math.max(12, Math.round(canvasHeight * 0.05))
+        ctx.font = `${fontSize}px sans-serif`
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.75)'
+        ctx.fillText(`${minutes}:${seconds}`, 10, canvasHeight - 10)
+      }
+
+      const drawLoop = () => {
         if (stopped) {
           return
         }
-        const videoWidth = videoEl.videoWidth
-        const videoHeight = videoEl.videoHeight
-        if (videoWidth > 0 && videoHeight > 0) {
-          // The PiP window is small; capping the buffer keeps drawImage cheap
-          const scale = Math.min(1, 854 / videoWidth)
-          const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
-          const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
-          if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
-            canvas.width = canvasWidth
-            canvas.height = canvasHeight
-          }
-          try {
-            ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
-          } catch {
-            // ignore decoder hiccups; next frame will draw
-          }
-        }
+        paintFrame()
         schedule()
       }
 
@@ -432,23 +449,19 @@ export default defineComponent({
           return
         }
         if (supportsVfc) {
-          vfcHandle = videoEl.requestVideoFrameCallback(draw)
+          vfcHandle = videoEl.requestVideoFrameCallback(drawLoop)
         } else {
-          rafHandle = requestAnimationFrame(draw)
+          rafHandle = requestAnimationFrame(drawLoop)
         }
       }
 
       // paint the current frame immediately, even while paused
-      draw()
+      drawLoop()
 
       // Safety net: some WebView versions throttle frame callbacks in PiP
       const redrawInterval = setInterval(() => {
-        if (!stopped && videoEl.videoWidth > 0) {
-          try {
-            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height)
-          } catch {
-            // ignore
-          }
+        if (!stopped) {
+          paintFrame()
         }
       }, 500)
 
@@ -3014,6 +3027,15 @@ export default defineComponent({
     onMounted(async () => {
       const videoElement = video.value
       if (process.env.IS_ANDROID) {
+        // Keep Chromium from promoting the video to a hardware overlay
+        // (SurfaceView/SurfaceControl plane). Overlay frames are invisible
+        // to Android system PiP *and* unreadable by canvas.drawImage —
+        // both showed a black window. A non-axis-aligned transform plus a
+        // filter forces the compositor to keep frames in a regular
+        // GPU texture. Visually imperceptible.
+        videoElement.style.transform = 'rotateZ(0.02deg)'
+        videoElement.style.filter = 'brightness(1.001)'
+
         window.addEventListener('media-play', mediaPlay)
         window.addEventListener('media-pause', mediaPause)
         videoElement.addEventListener('play', () => {
