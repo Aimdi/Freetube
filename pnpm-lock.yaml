@@ -151,8 +151,8 @@ importers:
         specifier: ^5.6.8
         version: 5.6.8(webpack@5.109.2)
       js-yaml:
-        specifier: ^5.2.3
-        version: 5.2.3
+        specifier: ^5.3.0
+        version: 5.3.0
       json-minimizer-webpack-plugin:
         specifier: ^5.0.1
         version: 5.0.1(webpack@5.109.2)
@@ -203,7 +203,7 @@ importers:
         version: 5.109.2(postcss@8.5.26)(webpack-cli@7.2.2)
       webpack-cli:
         specifier: ^7.2.2
-        version: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+        version: 7.2.2(js-yaml@5.3.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
       webpack-dev-server:
         specifier: ^6.0.0
         version: 6.0.0(tslib@2.8.1)(webpack-cli@7.2.2)(webpack@5.109.2)
@@ -1359,7 +1359,7 @@ packages:
     resolution: {integrity: sha512-qv3jnwoakeax2razYaMsGI/luWdliBLHTdC6jU55hQt1hcFqzauH/HsBollQ7IR4ySTtYhT+xyHoijpA16C+tA==}
 
   '@seald-io/nedb@https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b':
-    resolution: {tarball: https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b}
     version: 4.1.2
 
   '@sinclair/typebox@0.34.41':
@@ -1730,6 +1730,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@xtuc/ieee754@1.2.0':
     resolution: {integrity: sha512-DX8nKgqcGwsc0eJSqYt5lwP4DH5FlHnmuWWBRy7X0NcaGR0ZtuyeESgMwTYVEtxmsNGY+qit4QYT/MIYTOTPeA==}
@@ -3357,8 +3358,8 @@ packages:
     resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
-  js-yaml@5.2.3:
-    resolution: {integrity: sha512-n+mUVyUX5bVv7G/G2zyIHOhdxfuU1dY2NOFzTQUWiMUbFss8b57NFlgCCaggU78wSw5KVS9cllzeLyzyR+n5nw==}
+  js-yaml@5.3.0:
+    resolution: {integrity: sha512-muutsYr+e2+d3rTgUGslq5rxbBlUy3cJ61IsHag2QNDQV+7zXWjkUpmALIajhrlLlrgRUiymj6U3zUr/TMK84Q==}
     hasBin: true
 
   jsdoc-type-pratt-parser@8.0.0:
@@ -4526,9 +4527,9 @@ packages:
     resolution: {integrity: sha512-luGIzJ/H201aY0Hobs5853vY1eRJXPHH+u3oSWiTAYoufq5s/yIbRZS1QwCsj3f3Fyxc2C3HfptfI0brjE+RIQ==}
     engines: {node: '>=18'}
 
-  shallow-clone@3.0.1: 
+  shallow-clone@3.0.1:
     resolution: {integrity: sha512-/6KqX+GVUdqPuPPd2LxDDxzX6CAbjJehAAOKlNpqqUpAqPM6HeL8f+o3a+JsyGjn2lv0WY8UsTgUJjU9Ok55NA==}
-    engines: {node: '>=8'} 
+    engines: {node: '>=8'}
 
   shebang-command@2.0.0:
     resolution: {integrity: sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==}
@@ -8745,7 +8746,7 @@ snapshots:
     dependencies:
       argparse: 2.0.1
 
-  js-yaml@5.2.3:
+  js-yaml@5.3.0:
     dependencies:
       argparse: 2.0.1
 
@@ -10401,7 +10402,7 @@ snapshots:
       asn1js: 3.0.10
       tslib: 2.8.1
 
-  webpack-cli@7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2):
+  webpack-cli@7.2.2(js-yaml@5.3.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2):
     dependencies:
       '@discoveryjs/json-ext': 1.1.0
       commander: 14.0.3
@@ -10413,7 +10414,7 @@ snapshots:
       webpack: 5.109.2(postcss@8.5.26)(webpack-cli@7.2.2)
       webpack-merge: 6.0.1
     optionalDependencies:
-      js-yaml: 5.2.3
+      js-yaml: 5.3.0
       json5: 2.2.3
       webpack-dev-server: 6.0.0(tslib@2.8.1)(webpack-cli@7.2.2)(webpack@5.109.2)
 
@@ -10458,7 +10459,7 @@ snapshots:
       ws: 8.21.0
     optionalDependencies:
       webpack: 5.109.2(postcss@8.5.26)(webpack-cli@7.2.2)
-      webpack-cli: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+      webpack-cli: 7.2.2(js-yaml@5.3.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -10498,7 +10499,7 @@ snapshots:
       watchpack: 2.5.2
       webpack-sources: 3.5.1
     optionalDependencies:
-      webpack-cli: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+      webpack-cli: 7.2.2(js-yaml@5.3.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
     transitivePeerDependencies:
       - '@minify-html/node'
       - '@swc/core'
