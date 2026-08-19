@@ -1,5 +1,6 @@
 package io.freetubeapp.freetube.helpers
 
+import android.graphics.Rect
 import org.json.JSONObject
 
 data class ApplicationState(
@@ -14,5 +15,6 @@ data class ApplicationState(
   var pictureInPictureAspectWidth: Int = 16,
   var pictureInPictureAspectHeight: Int = 9,
   var pictureInPicturePlaying: Boolean = false,
+  var pictureInPictureSourceRect: Rect? = null,
   var isInPictureInPicture: Boolean = false
 )

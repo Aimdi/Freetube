@@ -423,6 +423,29 @@ class FreeTubeJavaScriptInterface(
   }
 
   /**
+   * Video bounds in CSS pixels, used as the PiP source-rect hint so the
+   * system animates from the player instead of the whole watch page.
+   */
+  @JavascriptInterface
+  fun setPictureInPictureSourceRect(left: Double, top: Double, width: Double, height: Double) {
+    if (width < 8 || height < 8) {
+      return
+    }
+    context.runOnUiThread {
+      val loc = IntArray(2)
+      webView.getLocationOnScreen(loc)
+      val scale = webView.scale.toDouble()
+      context.state.pictureInPictureSourceRect = android.graphics.Rect(
+        (loc[0] + left * scale).toInt(),
+        (loc[1] + top * scale).toInt(),
+        (loc[0] + (left + width) * scale).toInt(),
+        (loc[1] + (top + height) * scale).toInt()
+      )
+      (context as? MainActivity)?.applyPictureInPictureParams()
+    }
+  }
+
+  /**
    * Enters Android system Picture-in-Picture if the device supports it.
    */
   @JavascriptInterface

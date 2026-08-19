@@ -2,6 +2,7 @@ package io.freetubeapp.freetube
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
@@ -20,6 +21,7 @@ class MainActivity: FreeTubeActivity() {
       return Intent(this, KeepAliveService::class.java)
     }
   private lateinit var webView: FreeTubeWebView
+  private var pipEnterInProgress = false
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -93,28 +95,41 @@ class MainActivity: FreeTubeActivity() {
   }
 
   /**
-   * Android 11 and below do not support [android.app.PictureInPictureParams.Builder.setAutoEnterEnabled].
+   * Crop the player as soon as the user leaves. On Android 12+ the system also
+   * auto-enters PiP from [applyPictureInPictureParams]; this path is the
+   * fallback for older APIs and for devices that skip auto-enter.
    */
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
-      enterPictureInPictureModeIfPossible(requireAutoEnter = true)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      cropPlayerForPictureInPicture()
+      return
     }
+    enterPictureInPictureModeIfPossible(requireAutoEnter = true)
+  }
+
+  override fun onPictureInPictureRequested(): Boolean {
+    if (state.canEnterPictureInPicture && !isInPictureInPictureMode) {
+      enterPictureInPictureModeIfPossible(requireAutoEnter = true)
+      return true
+    }
+    return super.onPictureInPictureRequested()
   }
 
   override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
     state.isInPictureInPicture = isInPictureInPictureMode
+    pipEnterInProgress = false
     if (isInPictureInPictureMode) {
-      webView.evaluateJavascript(
-        "document.body.classList.add('androidPip');window.dispatchEvent(new Event('pip-enter'));",
-        null
-      )
+      webView.setBackgroundColor(Color.BLACK)
+      // PiP shows the live activity. Crop after enter so the floating
+      // window is the video, not the whole watch page.
+      cropPlayerForPictureInPicture()
+      webView.dispatchEvent("pip-enter")
     } else {
-      webView.evaluateJavascript(
-        "document.body.classList.remove('androidPip');window.dispatchEvent(new Event('pip-exit'));",
-        null
-      )
+      webView.setAndroidPipMode(false)
+      webView.setBackgroundColor(Color.TRANSPARENT)
+      webView.dispatchEvent("pip-exit")
       if (state.paused) {
         webView.dispatchEvent("app-pause")
       }
@@ -126,41 +141,72 @@ class MainActivity: FreeTubeActivity() {
       return
     }
     try {
-      setPictureInPictureParams(
-        PictureInPictureHelper.buildParams(
-          this,
-          state.pictureInPictureAspectWidth,
-          state.pictureInPictureAspectHeight,
-          state.canEnterPictureInPicture,
-          state.pictureInPicturePlaying
-        )
-      )
+      setPictureInPictureParams(currentPictureInPictureParams())
     } catch (_: IllegalStateException) {
       // Activity is finishing or not in a valid PiP state
     }
   }
 
+  /**
+   * @param requireAutoEnter when true, only enter if the player reported that
+   * auto-enter-on-leave is enabled and a video is playing
+   */
   fun enterPictureInPictureModeIfPossible(requireAutoEnter: Boolean = false): Boolean {
-    if (!PictureInPictureHelper.supportsPictureInPicture(this) || isInPictureInPictureMode) {
+    if (!PictureInPictureHelper.supportsPictureInPicture(this) || isInPictureInPictureMode || pipEnterInProgress) {
       return isInPictureInPictureMode
     }
     if (requireAutoEnter && !state.canEnterPictureInPicture) {
       return false
     }
-    return try {
-      enterPictureInPictureMode(
-        PictureInPictureHelper.buildParams(
-          this,
-          state.pictureInPictureAspectWidth,
-          state.pictureInPictureAspectHeight,
-          state.canEnterPictureInPicture,
-          state.pictureInPicturePlaying
-        )
-      )
+    // Android 12+ Home already auto-enters. Crop only — do not wait on JS
+    // or enterPictureInPictureMode() will run after onPause and fail.
+    if (requireAutoEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      cropPlayerForPictureInPicture()
+      return true
+    }
+    pipEnterInProgress = true
+    cropPlayerForPictureInPicture {
+      webView.post {
+        enterPictureInPictureNow()
+      }
+    }
+    return true
+  }
+
+  private fun cropPlayerForPictureInPicture(after: (() -> Unit)? = null) {
+    webView.exitHtmlFullscreen()
+    webView.setBackgroundColor(Color.BLACK)
+    webView.setAndroidPipMode(true, after)
+  }
+
+  private fun enterPictureInPictureNow() {
+    if (isInPictureInPictureMode) {
+      pipEnterInProgress = false
+      return
+    }
+    try {
+      val entered = enterPictureInPictureMode(currentPictureInPictureParams(autoEnter = false))
+      if (!entered) {
+        pipEnterInProgress = false
+        webView.setAndroidPipMode(false)
+        webView.setBackgroundColor(Color.TRANSPARENT)
+      }
     } catch (_: IllegalStateException) {
-      false
+      pipEnterInProgress = false
+      webView.setAndroidPipMode(false)
+      webView.setBackgroundColor(Color.TRANSPARENT)
     }
   }
+
+  private fun currentPictureInPictureParams(autoEnter: Boolean = state.canEnterPictureInPicture && !state.isInPictureInPicture) =
+    PictureInPictureHelper.buildParams(
+      this,
+      state.pictureInPictureAspectWidth,
+      state.pictureInPictureAspectHeight,
+      autoEnter,
+      state.pictureInPicturePlaying,
+      state.pictureInPictureSourceRect
+    )
 
   override fun onBack() {
     // bind the back button to the web-view history

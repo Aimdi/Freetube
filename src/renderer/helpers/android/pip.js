@@ -12,6 +12,19 @@ export function setPictureInPictureState(canAutoEnter, isPlaying, aspectWidth, a
 }
 
 /**
+ * Reports the on-screen video box so Android can animate PiP from the player.
+ * @param {number} left
+ * @param {number} top
+ * @param {number} width
+ * @param {number} height
+ */
+export function setPictureInPictureSourceRect(left, top, width, height) {
+  if (typeof android.setPictureInPictureSourceRect === 'function') {
+    android.setPictureInPictureSourceRect(left, top, width, height)
+  }
+}
+
+/**
  * Asks Android to enter system Picture-in-Picture immediately.
  */
 export function enterPictureInPicture() {

@@ -33,7 +33,7 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureState } from '../../helpers/android/pip'
+import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -355,6 +355,23 @@ export default defineComponent({
       const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
 
       setPictureInPictureState(canAutoEnter, isPlaying, width, height)
+
+      const boxEl = container.value || videoEl
+      if (boxEl) {
+        const box = boxEl.getBoundingClientRect()
+        if (box.width >= 8 && box.height >= 8) {
+          setPictureInPictureSourceRect(box.left, box.top, box.width, box.height)
+        }
+      }
+    }
+
+    function setAndroidPipLayout(enabled) {
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(enabled)
+        return
+      }
+      document.documentElement.classList.toggle('androidPip', enabled)
+      document.body.classList.toggle('androidPip', enabled)
     }
 
     function enterAndroidPictureInPicture() {
@@ -368,13 +385,13 @@ export default defineComponent({
         // pass
       }
 
-      document.body.classList.add('androidPip')
+      setAndroidPipLayout(true)
       syncAndroidPipState()
       enterPictureInPicture()
     }
 
     function handleAndroidPipEnter() {
-      document.body.classList.add('androidPip')
+      setAndroidPipLayout(true)
       try {
         document.exitFullscreen()
       } catch {
@@ -383,7 +400,7 @@ export default defineComponent({
     }
 
     function handleAndroidPipExit() {
-      document.body.classList.remove('androidPip')
+      setAndroidPipLayout(false)
     }
 
     if (process.env.IS_ANDROID) {
@@ -1376,6 +1393,10 @@ export default defineComponent({
 
         videoElementWidth.value = video_.clientWidth * devicePixelRatio
         videoElementHeight.value = video_.clientHeight * devicePixelRatio
+
+        if (process.env.IS_ANDROID) {
+          syncAndroidPipState()
+        }
       }
     })
 
