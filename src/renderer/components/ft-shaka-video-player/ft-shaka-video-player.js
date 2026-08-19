@@ -399,17 +399,11 @@ export default defineComponent({
 
       let stopped = false
       let vfcHandle = null
-      let rafHandle = null
-      let lastRelayTime = 0
-      // Adaptive pacing: aim for ~30fps, back off when encoding is slow
-      let relayIntervalMs = 33
+      let relayBusy = false
+      let lastCaptureTime = 0
 
       const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
       const canRelayFrames = typeof android.sendPipFrame === 'function'
-      // WebP encodes faster and smaller than JPEG in Chromium
-      const relayFormat = canvas.toDataURL('image/webp', 0.5).startsWith('data:image/webp')
-        ? 'image/webp'
-        : 'image/jpeg'
 
       window.__ftPipMirrorActive = true
 
@@ -419,9 +413,16 @@ export default defineComponent({
         if (videoWidth <= 0 || videoHeight <= 0) {
           return
         }
+        // Pace to ~30fps regardless of which clock fired
+        const now = performance.now()
+        if (now - lastCaptureTime < 30) {
+          return
+        }
+        lastCaptureTime = now
+
         // The PiP window is small; capping the buffer keeps drawImage
         // and the frame relay cheap
-        const scale = Math.min(1, 540 / videoWidth)
+        const scale = Math.min(1, 480 / videoWidth)
         const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
         const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
         if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
@@ -432,69 +433,81 @@ export default defineComponent({
           ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
         } catch {
           // ignore decoder hiccups; next frame will draw
+          return
         }
 
-        // Relay the frame to a native ImageView. The WebView's own surface
-        // is not composited into the PiP window on all devices, but native
-        // views always are. MSE-fed video never taints the canvas, and the
-        // legacy <video> uses crossorigin="anonymous", so toDataURL works.
-        if (canRelayFrames) {
-          const now = performance.now()
-          if (now - lastRelayTime >= relayIntervalMs) {
-            lastRelayTime = now
-            try {
-              android.sendPipFrame(canvas.toDataURL(relayFormat, 0.5))
-            } catch {
-              // tainted canvas; the in-page mirror keeps running
-            }
-            const encodeMs = performance.now() - now
-            if (encodeMs > 24) {
-              relayIntervalMs = Math.min(100, relayIntervalMs + 8)
-            } else if (relayIntervalMs > 33) {
-              relayIntervalMs = Math.max(33, relayIntervalMs - 4)
-            }
+        /*
+          Relay the frame to a native ImageView. The WebView's own surface
+          is not composited into the PiP window on all devices, but native
+          views always are.
+
+          toBlob encodes asynchronously off the main thread (unlike
+          toDataURL, whose synchronous encode stalled this very capture
+          loop and made PiP lag). Strictly one frame in flight — when
+          encoding can't keep up, frames are dropped, never queued, so
+          the PiP image stays in real time. MSE-fed video never taints
+          the canvas and the legacy <video> uses crossorigin="anonymous".
+        */
+        if (canRelayFrames && !relayBusy) {
+          relayBusy = true
+          try {
+            canvas.toBlob((blob) => {
+              if (!blob || stopped) {
+                relayBusy = false
+                return
+              }
+              const reader = new FileReader()
+              reader.onloadend = () => {
+                relayBusy = false
+                if (!stopped && typeof reader.result === 'string') {
+                  try {
+                    android.sendPipFrame(reader.result)
+                  } catch {
+                    // bridge hiccup; next frame will arrive shortly
+                  }
+                }
+              }
+              reader.onerror = () => {
+                relayBusy = false
+              }
+              reader.readAsDataURL(blob)
+            }, 'image/jpeg', 0.5)
+          } catch {
+            // tainted canvas; the in-page mirror keeps running
+            relayBusy = false
           }
         }
       }
 
-      const drawLoop = () => {
+      const vfcLoop = () => {
         if (stopped) {
           return
         }
         paintFrame()
-        schedule()
+        vfcHandle = videoEl.requestVideoFrameCallback(vfcLoop)
       }
 
-      const schedule = () => {
-        if (stopped) {
-          return
-        }
-        if (supportsVfc) {
-          vfcHandle = videoEl.requestVideoFrameCallback(drawLoop)
-        } else {
-          rafHandle = requestAnimationFrame(drawLoop)
-        }
-      }
-
-      // paint the current frame immediately, even while paused
-      drawLoop()
-
-      // Safety net: some WebView versions throttle frame callbacks in PiP
-      const redrawInterval = setInterval(() => {
+      // Steady capture clock: video-frame callbacks can be throttled or
+      // stalled while the activity is paused in PiP, so a timer drives
+      // the capture and the frame callback only adds precision on top.
+      const captureInterval = setInterval(() => {
         if (!stopped) {
           paintFrame()
         }
-      }, 500)
+      }, 33)
+
+      if (supportsVfc) {
+        vfcLoop()
+      } else {
+        paintFrame()
+      }
 
       pipMirrorStop = () => {
         stopped = true
         window.__ftPipMirrorActive = false
-        clearInterval(redrawInterval)
+        clearInterval(captureInterval)
         if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
           videoEl.cancelVideoFrameCallback(vfcHandle)
-        }
-        if (rafHandle !== null) {
-          cancelAnimationFrame(rafHandle)
         }
       }
     }
