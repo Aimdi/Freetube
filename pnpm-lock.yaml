@@ -109,8 +109,8 @@ importers:
         specifier: ^8.0.0
         version: 8.0.0(webpack@5.109.2)
       electron:
-        specifier: ^43.3.0
-        version: 43.3.0
+        specifier: ^43.4.0
+        version: 43.4.0
       electron-builder:
         specifier: ^26.15.7
         version: 26.15.7(electron-builder-squirrel-windows@26.15.7)
@@ -1359,7 +1359,7 @@ packages:
     resolution: {integrity: sha512-qv3jnwoakeax2razYaMsGI/luWdliBLHTdC6jU55hQt1hcFqzauH/HsBollQ7IR4ySTtYhT+xyHoijpA16C+tA==}
 
   '@seald-io/nedb@https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b':
-    resolution: {tarball: https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b}
+    resolution: {gitHosted: true, tarball: https://codeload.github.com/MarmadileManteater/nedb/tar.gz/73f58a88f015365774d045ba5c969ceb0e862b8b}
     version: 4.1.2
 
   '@sinclair/typebox@0.34.41':
@@ -1730,6 +1730,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@xtuc/ieee754@1.2.0':
     resolution: {integrity: sha512-DX8nKgqcGwsc0eJSqYt5lwP4DH5FlHnmuWWBRy7X0NcaGR0ZtuyeESgMwTYVEtxmsNGY+qit4QYT/MIYTOTPeA==}
@@ -2457,8 +2458,8 @@ packages:
     resolution: {integrity: sha512-bO3y10YikuUwUuDUQRM4KfwNkKhnpVO7IPdbsrejwN9/AABJzzTQ4GeHwyzNSrVO+tEH3/Np255a3sVZpZDjvg==}
     engines: {node: '>=8.0.0'}
 
-  electron@43.3.0:
-    resolution: {integrity: sha512-nLlvu0WFjftWsSaTkV2B/c4NDuJBspTyXu8vKSQ6vLvFt8uG3NgN49LLKcXddwX0GqVvAQDhciWp+4xOdTdhew==}
+  electron@43.4.0:
+    resolution: {integrity: sha512-3qxGF0CeQbiox5oWV1JlbWGQ1VerbmDhTFqW4sJ8h7uqTHniFYPObXJcDna0DMh32et0fFyKzz0YY8lJv3t5jg==}
     engines: {node: '>= 22.12.0'}
     hasBin: true
 
@@ -4526,9 +4527,9 @@ packages:
     resolution: {integrity: sha512-luGIzJ/H201aY0Hobs5853vY1eRJXPHH+u3oSWiTAYoufq5s/yIbRZS1QwCsj3f3Fyxc2C3HfptfI0brjE+RIQ==}
     engines: {node: '>=18'}
 
-  shallow-clone@3.0.1: 
+  shallow-clone@3.0.1:
     resolution: {integrity: sha512-/6KqX+GVUdqPuPPd2LxDDxzX6CAbjJehAAOKlNpqqUpAqPM6HeL8f+o3a+JsyGjn2lv0WY8UsTgUJjU9Ok55NA==}
-    engines: {node: '>=8'} 
+    engines: {node: '>=8'}
 
   shebang-command@2.0.0:
     resolution: {integrity: sha512-kHxr2zZpYtdmrN1qDjrrX/Z1rR1kG8Dx+gkpK1G4eXmvXswmcE1hTWBWYUzlraYw1/yZp6YuDY77YtvbN0dmDA==}
@@ -7785,7 +7786,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  electron@43.3.0:
+  electron@43.4.0:
     dependencies:
       '@electron-internal/extract-zip': 1.0.5
       '@electron/get': 5.1.0
