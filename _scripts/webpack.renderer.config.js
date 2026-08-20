@@ -192,6 +192,7 @@ const config = {
   ],
   resolve: {
     alias: {
+      android$: path.resolve(__dirname, '../src/renderer/helpers/android/android-stub.js'),
       DB_HANDLERS_ELECTRON_RENDERER_OR_WEB$: path.resolve(__dirname, '../src/datastores/handlers/electron.js'),
 
       'youtubei.js$': 'youtubei.js/web',

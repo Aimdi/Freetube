@@ -184,6 +184,7 @@ const state = {
   enableSubtitlesByDefault: false,
   enterFullscreenOnDisplayRotate: false,
   autoEnterPipOnLeave: true,
+  useNativePipPlayer: true,
   externalLinkHandling: '',
   externalPlayer: '',
   externalPlayerExecutable: '',

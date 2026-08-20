@@ -15,6 +15,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.freetubeapp.freetube.R
 import io.freetubeapp.freetube.activities.FreeTubeActivity
+import io.freetubeapp.freetube.helpers.PictureInPictureHelper
 import io.freetubeapp.freetube.helpers.WindowInsetsControllerWrapper
 import io.freetubeapp.freetube.helpers.spoofDesktopUserAgent
 import io.freetubeapp.freetube.javascript.FreeTubeJavaScriptInterface
@@ -41,6 +42,7 @@ class FreeTubeWebView (
     spoofDesktopUserAgent()
     layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
     setBackgroundColor(Color.TRANSPARENT)
+    setLayerType(LAYER_TYPE_HARDWARE, null)
 
     @SuppressLint("SetJavaScriptEnabled")
     settings.javaScriptEnabled = true
@@ -58,6 +60,7 @@ class FreeTubeWebView (
     webViewClient = object: WebViewClient() {
       override fun onPageFinished(view: WebView?, url: String?) {
         context.state.currentPage = url
+        injectAndroidPipSupport()
         super.onPageFinished(view, url)
       }
       override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -82,6 +85,7 @@ class FreeTubeWebView (
     }
 
     var fullscreenView: View? = null
+    var fullscreenCallback: CustomViewCallback? = null
     webChromeClient = object: ConsoleLogChromeClient({ message ->
       onConsoleMessage(message)
     }) {
@@ -97,11 +101,15 @@ class FreeTubeWebView (
 
           viewGroup.addView(view)
           fullscreenView = view
+          fullscreenCallback = callback
           dispatchEvent("start-fullscreen")
         }
       }
 
       override fun onHideCustomView() {
+        if (fullscreenView == null) {
+          return
+        }
         val viewGroup = (parent as ViewGroup)
 
         // show system ui
@@ -109,8 +117,23 @@ class FreeTubeWebView (
         windowInsetsControllerWrapper.show(WindowInsetsCompat.Type.systemBars())
 
         viewGroup.removeView(fullscreenView)
+        fullscreenView = null
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
         dispatchEvent("end-fullscreen")
       }
+    }
+  }
+
+  fun injectAndroidPipSupport() {
+    evaluateJavascript(PictureInPictureHelper.INSTALL_SCRIPT, null)
+  }
+
+  fun setAndroidPipMode(enabled: Boolean, after: (() -> Unit)? = null) {
+    val script = PictureInPictureHelper.INSTALL_SCRIPT +
+      ";window.__setAndroidPip && window.__setAndroidPip($enabled);"
+    evaluateJavascript(script) {
+      after?.invoke()
     }
   }
 

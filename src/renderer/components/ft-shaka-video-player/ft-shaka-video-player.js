@@ -33,7 +33,15 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureState } from '../../helpers/android/pip'
+import {
+  enterPictureInPicture,
+  getNativePipPositionMs,
+  isInPictureInPicture,
+  setNativePipPoster,
+  setNativePipSession,
+  setPictureInPictureSourceRect,
+  setPictureInPictureState
+} from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -87,6 +95,10 @@ export default defineComponent({
     },
     sabrData: {
       type: Object,
+      default: null
+    },
+    pipDashManifest: {
+      type: String,
       default: null
     },
     legacyFormats: {
@@ -306,6 +318,11 @@ export default defineComponent({
       return store.getters.getAutoEnterPipOnLeave
     })
 
+    /** @type {import('vue').ComputedRef<boolean>} */
+    const useNativePipPlayer = computed(() => {
+      return store.getters.getUseNativePipPlayer
+    })
+
     watch(enterFullscreenOnDisplayRotate, (newValue) => {
       ui.configure({
         enableFullscreenOnRotation: newValue
@@ -344,6 +361,78 @@ export default defineComponent({
       return { width, height }
     }
 
+    /**
+     * Picks a stream ExoPlayer can play. SABR (`sabr:` / application/sabr+json)
+     * is Shaka-only, so prefer a generated DASH MPD, then a remote DASH/HLS
+     * manifest, then a muxed progressive URL.
+     * @returns {{ url: string, mimeType: string } | null}
+     */
+    function getNativePipMedia() {
+      if (props.format === 'legacy' && activeLegacyFormat.value?.url) {
+        return {
+          url: activeLegacyFormat.value.url,
+          mimeType: activeLegacyFormat.value.mimeType || 'video/mp4'
+        }
+      }
+
+      if (props.pipDashManifest) {
+        return {
+          url: props.pipDashManifest,
+          mimeType: 'application/dash+xml'
+        }
+      }
+
+      const manifest = props.manifestSrc
+      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
+        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
+          return {
+            url: manifest,
+            mimeType: props.manifestMimeType || 'application/dash+xml'
+          }
+        }
+      }
+
+      const formats = (props.legacyFormats || [])
+        .filter(format => format.url)
+        .slice()
+        .sort((a, b) => (b.height || 0) - (a.height || 0))
+
+      if (formats[0]) {
+        return {
+          url: formats[0].url,
+          mimeType: formats[0].mimeType || 'video/mp4'
+        }
+      }
+
+      return null
+    }
+
+    function reportAndroidPipSourceRect() {
+      const videoEl = video.value
+      if (!videoEl) {
+        return
+      }
+      const rect = videoEl.getBoundingClientRect()
+      setPictureInPictureSourceRect(rect.left, rect.top, rect.width, rect.height)
+    }
+
+    function captureAndroidPipPoster() {
+      const videoEl = video.value
+      if (!videoEl || videoEl.videoWidth === 0) {
+        return
+      }
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.min(videoEl.videoWidth, 640)
+        canvas.height = Math.round(canvas.width * (videoEl.videoHeight / videoEl.videoWidth))
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height)
+        setNativePipPoster(canvas.toDataURL('image/jpeg', 0.7))
+      } catch (error) {
+        console.info('[FreeTubePip] poster capture failed', error)
+      }
+    }
+
     function syncAndroidPipState() {
       if (!process.env.IS_ANDROID) {
         return
@@ -351,10 +440,39 @@ export default defineComponent({
 
       const videoEl = video.value
       const { width, height } = getAndroidPipAspectRatio()
-      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended)
+      const isPlaying = !!(window.__androidNativePip) || !!(videoEl && !videoEl.paused && !videoEl.ended)
       const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
 
       setPictureInPictureState(canAutoEnter, isPlaying, width, height)
+      reportAndroidPipSourceRect()
+
+      if (props.format === 'audio') {
+        setNativePipSession(null)
+        return
+      }
+
+      const media = getNativePipMedia()
+      setNativePipSession({
+        url: media?.url || '',
+        mimeType: media?.mimeType || '',
+        positionMs: Math.floor((videoEl?.currentTime || 0) * 1000),
+        playbackRate: videoEl?.playbackRate || 1,
+        thumbnailUrl: props.thumbnail || '',
+        preferredHeight: height,
+        useNative: !!(useNativePipPlayer.value && media?.url)
+      })
+    }
+
+    function setWebViewAbrEnabled(enabled) {
+      if (!player) {
+        return
+      }
+      try {
+        player.configure({ abr: { enabled } })
+        console.info('[FreeTubePip] ABR', enabled ? 'enabled' : 'locked')
+      } catch (error) {
+        console.info('[FreeTubePip] ABR configure failed', error)
+      }
     }
 
     function enterAndroidPictureInPicture() {
@@ -368,28 +486,71 @@ export default defineComponent({
         // pass
       }
 
-      document.body.classList.add('androidPip')
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(true)
+      } else {
+        document.body.classList.add('androidPip')
+        document.documentElement.classList.add('androidPip')
+      }
+      captureAndroidPipPoster()
       syncAndroidPipState()
+      if (!useNativePipPlayer.value || !getNativePipMedia()) {
+        setWebViewAbrEnabled(false)
+      }
       enterPictureInPicture()
     }
 
     function handleAndroidPipEnter() {
-      document.body.classList.add('androidPip')
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(true)
+      } else {
+        document.body.classList.add('androidPip')
+        document.documentElement.classList.add('androidPip')
+      }
       try {
         document.exitFullscreen()
       } catch {
         // pass
       }
+      captureAndroidPipPoster()
+      syncAndroidPipState()
+      if (!window.__androidNativePip) {
+        setWebViewAbrEnabled(false)
+      }
+      console.info('[FreeTubePip] pip-enter native=', !!window.__androidNativePip)
     }
 
-    function handleAndroidPipExit() {
-      document.body.classList.remove('androidPip')
+    /**
+     * @param {CustomEvent} [event]
+     */
+    function handleAndroidPipExit(event) {
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(false)
+      } else {
+        document.body.classList.remove('androidPip')
+        document.documentElement.classList.remove('androidPip')
+      }
+      setWebViewAbrEnabled(true)
+
+      const videoEl = video.value
+      const nativePositionMs = event?.detail?.positionMs || getNativePipPositionMs()
+      if (videoEl && nativePositionMs > 0) {
+        const seconds = nativePositionMs / 1000
+        if (Math.abs((videoEl.currentTime || 0) - seconds) > 0.4) {
+          videoEl.currentTime = seconds
+        }
+        console.info('[FreeTubePip] pip-exit seek', seconds)
+      }
+      if (videoEl) {
+        videoEl.muted = false
+      }
+      syncAndroidPipState()
     }
 
     if (process.env.IS_ANDROID) {
       window.addEventListener('pip-enter', handleAndroidPipEnter)
       window.addEventListener('pip-exit', handleAndroidPipExit)
-      watch([autoEnterPipOnLeave, () => props.format], () => {
+      watch([autoEnterPipOnLeave, useNativePipPlayer, () => props.format, () => props.pipDashManifest], () => {
         syncAndroidPipState()
       })
     }
@@ -2868,9 +3029,15 @@ export default defineComponent({
     const initLoadWaitTimeToastAC = new AbortController()
 
     const mediaPlay = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.play()
     }
     const mediaPause = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.pause()
     }
     let updateBufferInterval = null
@@ -2886,24 +3053,40 @@ export default defineComponent({
           syncAndroidPipState()
         })
         videoElement.addEventListener('pause', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           android.disableKeepScreenOn()
           updateMediaSessionState(STATE_PAUSED)
           syncAndroidPipState()
         })
         videoElement.addEventListener('ended', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           syncAndroidPipState()
         })
         videoElement.addEventListener('loadedmetadata', () => {
           syncAndroidPipState()
         })
-        videoElement.addEventListener('timeupdate', () => {
-          updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
-        })
-        updateBufferInterval = setInterval(() => {
-          if (videoElement.buffered.length == 0) {
-            updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_BUFFERING, Math.floor(videoElement.currentTime * 1000))
+        const pushMediaPosition = throttle(() => {
+          if (window.__androidNativePip) {
+            return
           }
-        }, 0)
+          updateMediaSessionState(
+            videoElement.paused ? STATE_PAUSED : STATE_PLAYING,
+            Math.floor(videoElement.currentTime * 1000)
+          )
+        }, 1000)
+        videoElement.addEventListener('timeupdate', pushMediaPosition)
+        updateBufferInterval = setInterval(() => {
+          if (window.__androidNativePip) {
+            return
+          }
+          if (videoElement.buffered.length === 0) {
+            updateMediaSessionState(videoElement.paused ? STATE_BUFFERING : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
+          }
+        }, 1000)
       }
 
       const volume = sessionStorage.getItem('volume')
@@ -3433,6 +3616,7 @@ export default defineComponent({
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
         setPictureInPictureState(false, false, 16, 9)
+        setNativePipSession(null)
       }
     })
 
