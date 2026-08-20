@@ -35,10 +35,11 @@ Android 10+ can keep a playing video in a floating system PiP window while you u
 
 * Press **Home** or switch apps while a video is playing (enabled by default in Player Settings)
 * Tap the **Picture in Picture** button on the player
-* Use play, pause, next, and previous from the PiP window
+* Use play, pause, next, and previous from the PiP window or the media notification
 * Turn off **Enter Picture-in-Picture when leaving the app** if you only want background audio with the media notification
+* **Use native Picture-in-Picture player** (on by default) hands the current DASH/HLS/progressive stream to ExoPlayer on a TextureView. WebView HTML5/Shaka video is not reliably composited by the system PiP surface (black screen, lag, desync, quality collapse). Turn the native player off only to test the experimental WebView-only crop.
 
-This uses Android's activity PiP API (not the browser `<video>` PiP API, which WebView does not expose reliably). The existing background playback service and media notification still work.
+Exiting PiP seeks the Shaka player back to the native player's timestamp. Look for `[FreeTubePip]` in logcat / the JS console when diagnosing remaining issues.
 
 <p align='center'>
   <a href='https://apt.izzysoft.de/fdroid/index/apk/io.freetubeapp.freetube'>

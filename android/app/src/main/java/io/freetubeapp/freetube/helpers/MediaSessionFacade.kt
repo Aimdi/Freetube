@@ -68,9 +68,10 @@ class MediaSessionFacade(
 
     val statePosition: Long? = givenPosition ?: playbackPosition
     playbackPosition = statePosition
+    val speed = if (state == STATE_PAUSED || state == STATE_BUFFERING) 0.0f else 1.0f
     session.setPlaybackState(
       PlaybackState.Builder()
-        .setState(state, statePosition ?: 0, 0.0f)
+        .setState(state, statePosition ?: 0, speed)
         .setActions(
           PlaybackState.ACTION_PLAY_PAUSE or
           PlaybackState.ACTION_PAUSE or

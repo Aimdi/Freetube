@@ -6,6 +6,8 @@ Player Settings:
   Use Old Layout For Info: Use old layout for watch video info
   Enter Picture in Picture When Leaving App: Enter Picture-in-Picture when leaving the app
   Enter Picture in Picture When Leaving App Tooltip: When a video is playing, pressing Home or switching apps opens a floating Picture-in-Picture window. Turn this off to keep background audio playback without a floating window.
+  Use Native Picture in Picture Player: Use native Picture-in-Picture player
+  Use Native Picture in Picture Player Tooltip: Hands the current stream to a native ExoPlayer surface while Picture-in-Picture is open. This avoids the black screen, lag, and quality drop of playing Shaka inside the system PiP window. Turn this off only to test the experimental WebView-only path.
 Distraction Free Settings:
   Hide Thumbnail In Media Controls: Hide thumbnail in media controls notification
 Data Settings:

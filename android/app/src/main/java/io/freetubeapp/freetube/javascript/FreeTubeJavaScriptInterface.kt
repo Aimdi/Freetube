@@ -2,13 +2,16 @@ package io.freetubeapp.freetube.javascript
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Rect
 import android.media.session.PlaybackState.STATE_PAUSED
+import android.util.Log
 import android.webkit.JavascriptInterface
 import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import io.freetubeapp.freetube.MainActivity
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.helpers.MediaSessionFacade
+import io.freetubeapp.freetube.helpers.NativePipPlayer
 import io.freetubeapp.freetube.helpers.Promise
 import io.freetubeapp.freetube.helpers.WriteMode
 import io.freetubeapp.freetube.helpers.getDataDirectory
@@ -37,7 +40,11 @@ class FreeTubeJavaScriptInterface(
     context,
     "media_controls",
     { event ->
-      webView.dispatchEvent(event)
+      context.runOnUiThread {
+        if ((context as? MainActivity)?.handleNativePipMediaEvent(event) != true) {
+          webView.dispatchEvent(event)
+        }
+      }
     },
     { position ->
       webView.dispatchEvent("media-seek", "position", position)
@@ -410,6 +417,7 @@ class FreeTubeJavaScriptInterface(
     aspectHeight: Double
   ) {
     context.runOnUiThread {
+      Log.d(PIP_TAG, "setState auto=$canAutoEnter playing=$isPlaying aspect=${aspectWidth}x${aspectHeight}")
       context.state.canEnterPictureInPicture = canAutoEnter
       context.state.pictureInPicturePlaying = isPlaying
       val width = aspectWidth.toInt()
@@ -423,11 +431,34 @@ class FreeTubeJavaScriptInterface(
   }
 
   /**
+   * Reports the on-screen video box so Android can animate PiP from the player.
+   */
+  @JavascriptInterface
+  fun setPictureInPictureSourceRect(left: Double, top: Double, width: Double, height: Double) {
+    context.runOnUiThread {
+      if (width <= 0 || height <= 0) {
+        context.state.pictureInPictureSourceRect = null
+        return@runOnUiThread
+      }
+      val density = context.resources.displayMetrics.density
+      val rect = Rect(
+        (left * density).toInt(),
+        (top * density).toInt(),
+        ((left + width) * density).toInt(),
+        ((top + height) * density).toInt()
+      )
+      context.state.pictureInPictureSourceRect = rect
+      (context as? MainActivity)?.applyPictureInPictureParams()
+    }
+  }
+
+  /**
    * Enters Android system Picture-in-Picture if the device supports it.
    */
   @JavascriptInterface
   fun enterPictureInPicture() {
     context.runOnUiThread {
+      Log.d(PIP_TAG, "enterPictureInPicture from JS")
       (context as? MainActivity)?.enterPictureInPictureModeIfPossible()
     }
   }
@@ -435,6 +466,73 @@ class FreeTubeJavaScriptInterface(
   @JavascriptInterface
   fun isInPictureInPicture(): Boolean {
     return context.state.isInPictureInPicture
+  }
+
+  /**
+   * Registers a stream the native TextureView / ExoPlayer can play in PiP.
+   * WebView HTML5 video is not composited into the system PiP window.
+   *
+   * @param sessionJson keys: url, mimeType, audioUrl, audioMimeType, positionMs,
+   * playbackRate, thumbnailUrl, preferredHeight, useNative
+   */
+  @JavascriptInterface
+  fun setNativePipSession(sessionJson: String?) {
+    if (sessionJson.isNullOrBlank()) {
+      context.runOnUiThread {
+        context.state.nativePipUrl = null
+        context.state.useNativePipPlayer = false
+      }
+      return
+    }
+    try {
+      val json = JSONObject(sessionJson)
+      context.runOnUiThread {
+        context.state.useNativePipPlayer = json.optBoolean("useNative", true)
+        context.state.nativePipUrl = json.optString("url").takeIf { it.isNotBlank() }
+        context.state.nativePipMimeType = json.optString("mimeType").takeIf { it.isNotBlank() }
+        context.state.nativePipAudioUrl = json.optString("audioUrl").takeIf { it.isNotBlank() }
+        context.state.nativePipAudioMimeType = json.optString("audioMimeType").takeIf { it.isNotBlank() }
+        val positionMs = json.optLong("positionMs", -1L)
+        if (positionMs >= 0) {
+          context.state.nativePipPositionMs = positionMs
+        }
+        val rate = json.optDouble("playbackRate", 1.0)
+        if (rate > 0) {
+          context.state.nativePipPlaybackRate = rate.toFloat()
+        }
+        context.state.nativePipThumbnailUrl = json.optString("thumbnailUrl").takeIf { it.isNotBlank() }
+        val height = json.optInt("preferredHeight", 0)
+        if (height > 0) {
+          context.state.nativePipPreferredHeight = height
+        }
+        Log.d(
+          PIP_TAG,
+          "setNativePipSession native=${context.state.useNativePipPlayer} " +
+            "url=${context.state.nativePipUrl?.take(96)} mime=${context.state.nativePipMimeType} " +
+            "pos=${context.state.nativePipPositionMs} height=${context.state.nativePipPreferredHeight}"
+        )
+        (context as? MainActivity)?.onNativePipMediaUpdated()
+      }
+    } catch (error: Exception) {
+      Log.e(PIP_TAG, "setNativePipSession parse failed", error)
+    }
+  }
+
+  @JavascriptInterface
+  fun setNativePipPoster(dataUrl: String?) {
+    if (dataUrl.isNullOrBlank()) {
+      return
+    }
+    val bitmap = NativePipPlayer.decodeDataUrl(dataUrl) ?: return
+    context.runOnUiThread {
+      (context as? MainActivity)?.setNativePipPoster(bitmap)
+    }
+  }
+
+  @JavascriptInterface
+  fun getNativePipPositionMs(): Double {
+    return (context as? MainActivity)?.nativePipPositionMs()?.toDouble()
+      ?: context.state.nativePipPositionMs.toDouble()
   }
 
   // endregion
@@ -524,4 +622,8 @@ class FreeTubeJavaScriptInterface(
   }
 
   // endregion
+
+  companion object {
+    private const val PIP_TAG = "FreeTubePip"
+  }
 }

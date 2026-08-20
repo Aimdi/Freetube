@@ -9,6 +9,9 @@
    @android.webkit.JavascriptInterface <methods>;
 }
 
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
+
 # Uncomment this to preserve the line number information for
 # debugging stack traces.
 #-keepattributes SourceFile,LineNumberTable
