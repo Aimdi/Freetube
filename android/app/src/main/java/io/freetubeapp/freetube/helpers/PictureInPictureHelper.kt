@@ -104,7 +104,7 @@ object PictureInPictureHelper {
    * Toggling `html.androidPip` crops the page to the video using % sizes
    * (vw/vh stay at the full-screen size inside a PiP window).
    */
-  const val INSTALL_SCRIPT = """
+  val INSTALL_SCRIPT = """
     (function () {
       if (!document.getElementById('android-pip-style')) {
         var style = document.createElement('style');

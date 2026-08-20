@@ -8,6 +8,7 @@ import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -85,7 +86,7 @@ class FreeTubeWebView (
     }
 
     var fullscreenView: View? = null
-    var fullscreenCallback: CustomViewCallback? = null
+    var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     webChromeClient = object: ConsoleLogChromeClient({ message ->
       onConsoleMessage(message)
     }) {
