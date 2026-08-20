@@ -25,7 +25,8 @@ __coverage__
 csak-timelog.json
 .idea/
 debug/
-assets/
+# Generated Android webpack output (keep source assets in src/renderer/assets tracked)
+android/app/src/main/assets/
 # Lefthook
 lefthook-local.yml
 *.bak
