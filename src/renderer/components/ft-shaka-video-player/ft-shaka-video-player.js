@@ -2896,14 +2896,29 @@ export default defineComponent({
         videoElement.addEventListener('loadedmetadata', () => {
           syncAndroidPipState()
         })
+        // `timeupdate` can fire dozens of times per second and every media
+        // session update crosses the JS <-> native bridge (recreating the
+        // notification on Android < 13). Pushing the position ~once per second
+        // is plenty for the scrubber and avoids the playback jank that was most
+        // noticeable in Picture-in-Picture. The native side reports a playback
+        // speed of 1.0 while playing, so Android interpolates the position
+        // smoothly between these updates.
+        let lastMediaSessionPositionUpdate = 0
         videoElement.addEventListener('timeupdate', () => {
+          const now = performance.now()
+          if (now - lastMediaSessionPositionUpdate < 1000) {
+            return
+          }
+          lastMediaSessionPositionUpdate = now
           updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
         })
+        // A 0ms interval is effectively a busy loop that churns the main thread
+        // for the entire session; poll for the buffering state once per second.
         updateBufferInterval = setInterval(() => {
-          if (videoElement.buffered.length == 0) {
+          if (videoElement.buffered.length === 0) {
             updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_BUFFERING, Math.floor(videoElement.currentTime * 1000))
           }
-        }, 0)
+        }, 1000)
       }
 
       const volume = sessionStorage.getItem('volume')
