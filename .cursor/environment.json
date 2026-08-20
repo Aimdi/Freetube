@@ -1,0 +1,15 @@
+{
+  "name": "FreeTube",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "user": "node",
+  "install": "pnpm install --frozen-lockfile",
+  "terminals": [
+    {
+      "name": "dev:web",
+      "command": "pnpm run dev:web"
+    }
+  ],
+  "ports": [9080]
+}
