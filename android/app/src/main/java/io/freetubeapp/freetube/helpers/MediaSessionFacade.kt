@@ -68,9 +68,13 @@ class MediaSessionFacade(
 
     val statePosition: Long? = givenPosition ?: playbackPosition
     playbackPosition = statePosition
+    // Report a real playback speed while playing so Android interpolates the
+    // position of the PiP / media-notification scrubber smoothly between the
+    // (throttled) position updates. A speed of 0 makes the scrubber look frozen.
+    val playbackSpeed = if (state == PlaybackState.STATE_PLAYING) 1.0f else 0.0f
     session.setPlaybackState(
       PlaybackState.Builder()
-        .setState(state, statePosition ?: 0, 0.0f)
+        .setState(state, statePosition ?: 0, playbackSpeed)
         .setActions(
           PlaybackState.ACTION_PLAY_PAUSE or
           PlaybackState.ACTION_PAUSE or
