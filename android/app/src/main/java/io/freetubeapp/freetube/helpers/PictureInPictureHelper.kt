@@ -63,7 +63,8 @@ object PictureInPictureHelper {
 
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
       builder.setAutoEnterEnabled(autoEnter)
-      builder.setSeamlessResizeEnabled(true)
+      // Video surfaces must not crossfade; true freezes the overlay hole.
+      builder.setSeamlessResizeEnabled(false)
     }
 
     Log.d(

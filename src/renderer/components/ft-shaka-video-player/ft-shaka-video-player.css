@@ -265,7 +265,7 @@
 :global(body.androidPip) .ftVideoPlayer > .player {
   width: 100% !important;
   height: 100% !important;
-  object-fit: contain !important;
+  background: #000 !important;
 }
 
 :global(html.androidPip) .shaka-controls-container,

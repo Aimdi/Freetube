@@ -10,11 +10,22 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.TextView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.datasource.DataSource
+import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
 import io.freetubeapp.freetube.helpers.NativePipPlayer
 import io.freetubeapp.freetube.helpers.NativePipSession
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
+import io.freetubeapp.freetube.helpers.PipStreamBuffer
+import io.freetubeapp.freetube.helpers.PipStreamDataSource
 import io.freetubeapp.freetube.helpers.isDarkMode
 import io.freetubeapp.freetube.helpers.toYtUrl
 import io.freetubeapp.freetube.helpers.urlEncode
@@ -98,7 +109,8 @@ class MainActivity: FreeTubeActivity() {
   }
 
   /**
-   * Android 11 and below do not support [android.app.PictureInPictureParams.Builder.setAutoEnterEnabled].
+   * Android 12+ auto-enters PiP from the params set in [applyPictureInPictureParams].
+   * Older versions enter here. Either way the crop CSS goes in as early as possible.
    */
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
@@ -141,6 +153,107 @@ class MainActivity: FreeTubeActivity() {
       )
       if (state.paused) {
         webView.dispatchEvent("app-pause")
+      }
+    }
+  }
+
+  /**
+   * The page's MediaRecorder started streaming; play it natively.
+   * Real video pipeline: hardware decode, proper frame pacing, and
+   * A/V sync from the container timestamps.
+   */
+  fun onPipStreamStart(@Suppress("UNUSED_PARAMETER") mimeType: String) {
+    stopPipStreamPlayer()
+    PipStreamBuffer.reset()
+    val dataSourceFactory = DataSource.Factory { PipStreamDataSource() }
+    val player = ExoPlayer.Builder(this)
+      .setMediaSourceFactory(DefaultMediaSourceFactory(dataSourceFactory))
+      .setLoadControl(
+        DefaultLoadControl.Builder()
+          .setBufferDurationsMs(500, 10_000, 250, 500)
+          .build()
+      )
+      .build()
+    player.setVideoTextureView(pipStreamTexture)
+    player.addListener(object : Player.Listener {
+      override fun onRenderedFirstFrame() {
+        lastPipFrameAt = SystemClock.elapsedRealtime()
+        pipStreamTexture.visibility = View.VISIBLE
+        // reveal the stream; stop the JPEG frame relay
+        pipTexture.visibility = View.INVISIBLE
+        pipStatus.visibility = View.GONE
+        webView.evaluateJavascript("window.__ftPipStreamRendering && window.__ftPipStreamRendering()", null)
+      }
+
+      override fun onPlayerError(error: PlaybackException) {
+        stopPipStreamPlayer()
+        webView.evaluateJavascript("window.__ftPipStreamFailed && window.__ftPipStreamFailed()", null)
+      }
+    })
+    player.setMediaItem(MediaItem.fromUri("pipstream://live"))
+    player.prepare()
+    player.playWhenReady = true
+    pipStreamPlayer = player
+  }
+
+  /** chunk heartbeat for the diagnostics poller */
+  fun onPipStreamData() {
+    lastPipFrameAt = SystemClock.elapsedRealtime()
+  }
+
+  private fun stopPipStreamPlayer() {
+    PipStreamBuffer.close()
+    pipStreamPlayer?.release()
+    pipStreamPlayer = null
+    pipStreamTexture.visibility = View.INVISIBLE
+    pipTexture.visibility = View.VISIBLE
+  }
+
+  /**
+   * Called from the frame-decoder thread. Draws straight onto the
+   * TextureView surface so no per-frame work queues on the UI thread,
+   * then acks the frame so the page can measure end-to-end latency.
+   */
+  fun onPipFrame(bitmap: Bitmap, captureId: Double) {
+    lastPipFrameAt = SystemClock.elapsedRealtime()
+    if (!isInPictureInPictureMode || !pipTexture.isAvailable) {
+      return
+    }
+    val canvas = try {
+      pipTexture.lockCanvas() ?: return
+    } catch (_: IllegalStateException) {
+      return
+    }
+    try {
+      canvas.drawColor(Color.BLACK)
+      val canvasWidth = canvas.width.toFloat()
+      val canvasHeight = canvas.height.toFloat()
+      val bitmapWidth = bitmap.width.toFloat()
+      val bitmapHeight = bitmap.height.toFloat()
+      if (bitmapWidth > 0 && bitmapHeight > 0) {
+        val scale = minOf(canvasWidth / bitmapWidth, canvasHeight / bitmapHeight)
+        val drawWidth = bitmapWidth * scale
+        val drawHeight = bitmapHeight * scale
+        val left = (canvasWidth - drawWidth) / 2f
+        val top = (canvasHeight - drawHeight) / 2f
+        canvas.drawBitmap(bitmap, null, RectF(left, top, left + drawWidth, top + drawHeight), pipFramePaint)
+      }
+    } finally {
+      try {
+        pipTexture.unlockCanvasAndPost(canvas)
+      } catch (_: IllegalStateException) {
+        // surface went away mid-draw (PiP dismissed)
+      }
+    }
+    mainHandler.post {
+      webView.evaluateJavascript(
+        "window.__ftPipFrameShown && window.__ftPipFrameShown($captureId)",
+        null
+      )
+      if (pipStatus.visibility == View.VISIBLE &&
+        SystemClock.elapsedRealtime() - lastPipFrameAt < 2000
+      ) {
+        pipStatus.visibility = View.GONE
       }
     }
   }
@@ -345,6 +458,16 @@ class MainActivity: FreeTubeActivity() {
       pipEnterInProgress = false
     }
   }
+
+  private fun currentPictureInPictureParams(autoEnter: Boolean = state.canEnterPictureInPicture && !state.isInPictureInPicture) =
+    PictureInPictureHelper.buildParams(
+      this,
+      state.pictureInPictureAspectWidth,
+      state.pictureInPictureAspectHeight,
+      autoEnter,
+      state.pictureInPicturePlaying,
+      state.pictureInPictureSourceRect
+    )
 
   override fun onBack() {
     if (state.isInAPrompt) {

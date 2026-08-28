@@ -500,6 +500,23 @@ export default defineComponent({
       enterPictureInPicture()
     }
 
+    async function beginAndroidPipSession() {
+      window.__ftPipStreamRendering = handlePipStreamRendering
+      window.__ftPipStreamFailed = handlePipStreamFailed
+      startAndroidPipMirror()
+      await enableAndroidPipAudioSync()
+      startAndroidPipStream()
+    }
+
+    function endAndroidPipSession() {
+      delete window.__ftPipStreamRendering
+      delete window.__ftPipStreamFailed
+      stopAndroidPipStream()
+      stopAndroidPipMirror()
+      disableAndroidPipAudioSync()
+      setPipSpeakersMuted(false)
+    }
+
     function handleAndroidPipEnter() {
       if (typeof window.__setAndroidPip === 'function') {
         window.__setAndroidPip(true)
@@ -1537,6 +1554,10 @@ export default defineComponent({
 
         videoElementWidth.value = video_.clientWidth * devicePixelRatio
         videoElementHeight.value = video_.clientHeight * devicePixelRatio
+
+        if (process.env.IS_ANDROID) {
+          syncAndroidPipState()
+        }
       }
     })
 
@@ -3045,6 +3066,15 @@ export default defineComponent({
     onMounted(async () => {
       const videoElement = video.value
       if (process.env.IS_ANDROID) {
+        // Keep Chromium from promoting the video to a hardware overlay
+        // (SurfaceView/SurfaceControl plane). Overlay frames are invisible
+        // to Android system PiP *and* unreadable by canvas.drawImage —
+        // both showed a black window. A non-axis-aligned transform plus a
+        // filter forces the compositor to keep frames in a regular
+        // GPU texture. Visually imperceptible.
+        videoElement.style.transform = 'rotateZ(0.02deg)'
+        videoElement.style.filter = 'brightness(1.001)'
+
         window.addEventListener('media-play', mediaPlay)
         window.addEventListener('media-pause', mediaPause)
         videoElement.addEventListener('play', () => {
@@ -3615,6 +3645,8 @@ export default defineComponent({
       window.removeEventListener('pip-exit', handleAndroidPipExit)
       clearInterval(updateBufferInterval)
       if (process.env.IS_ANDROID) {
+        endAndroidPipSession()
+        closeAndroidPipAudioSync()
         setPictureInPictureState(false, false, 16, 9)
         setNativePipSession(null)
       }

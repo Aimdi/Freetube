@@ -13,14 +13,14 @@ jobs:
     environment: release
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v7
     - name: Use Node.js
       uses: actions/setup-node@v3
       with:
         node-version: 18.x
 
     - name: Install pnpm
-      uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 #v6.0.8
+      uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 #v6.0.10
       with:
         version: 10
         cache: false
@@ -34,7 +34,7 @@ jobs:
 
     - name: 📚Read package.json
       id: pkg
-      uses: jaywcjlove/github-action-package@v1.3.0
+      uses: jaywcjlove/github-action-package@v2.1.0
 
     - name: Set Version Number Variable
       id: versionNumber
@@ -173,7 +173,7 @@ jobs:
         body_path: release.txt
 
     - name: ⬆ Upload HTML5 Artifact to Release
-      uses: actions/upload-release-asset@v1.0.1
+      uses: actions/upload-release-asset@v1.0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -183,7 +183,7 @@ jobs:
         asset_content_type: application/zip
 
     - name: ⬆ Upload Android APK Artifact to Release
-      uses: actions/upload-release-asset@v1.0.1
+      uses: actions/upload-release-asset@v1.0.2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
