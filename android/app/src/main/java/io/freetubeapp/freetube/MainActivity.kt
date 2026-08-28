@@ -4,15 +4,9 @@ import android.content.Intent
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.os.SystemClock
-import android.view.Gravity
-import android.view.TextureView
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -27,6 +21,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.freetubeapp.freetube.activities.FreeTubeActivity
 import io.freetubeapp.freetube.databinding.ActivityMainBinding
+import io.freetubeapp.freetube.helpers.NativePipPlayer
+import io.freetubeapp.freetube.helpers.NativePipSession
 import io.freetubeapp.freetube.helpers.PictureInPictureHelper
 import io.freetubeapp.freetube.helpers.PipStreamBuffer
 import io.freetubeapp.freetube.helpers.PipStreamDataSource
@@ -42,58 +38,8 @@ class MainActivity: FreeTubeActivity() {
       return Intent(this, KeepAliveService::class.java)
     }
   private lateinit var webView: FreeTubeWebView
-  private lateinit var pipOverlay: FrameLayout
-  private lateinit var pipTexture: TextureView
-  private lateinit var pipStreamTexture: TextureView
-  private lateinit var pipStatus: TextView
-  private val mainHandler = Handler(Looper.getMainLooper())
-  private val pipFramePaint = Paint(Paint.FILTER_BITMAP_FLAG)
-  private var lastPipFrameAt = 0L
+  private lateinit var nativePipPlayer: NativePipPlayer
   private var pipEnterInProgress = false
-  private var pipStreamPlayer: ExoPlayer? = null
-
-  /**
-   * Ticks the in-page capture from the native side. Renderer timers are
-   * throttled while the activity is paused in PiP; evaluateJavascript
-   * injections are not.
-   */
-  private val pipCaptureClock = object : Runnable {
-    override fun run() {
-      if (!isInPictureInPictureMode) {
-        return
-      }
-      webView.evaluateJavascript("window.__ftPipCapture && window.__ftPipCapture()", null)
-      mainHandler.postDelayed(this, 33)
-    }
-  }
-
-  private val pipSizeNotifier = Runnable {
-    if (isInPictureInPictureMode && pipTexture.width > 0) {
-      webView.evaluateJavascript("window.__ftPipTargetWidth = ${pipTexture.width}", null)
-    }
-  }
-
-  private val pipStatusPoller = object : Runnable {
-    override fun run() {
-      if (!isInPictureInPictureMode) {
-        return
-      }
-      // Only surface diagnostics when no frames are arriving
-      if (SystemClock.elapsedRealtime() - lastPipFrameAt > 2000) {
-        webView.evaluateJavascript(
-          "(function(){try{var v=document.querySelector('video.player');" +
-            "return 'video:'+(v?1:0)+' size:'+(v?v.videoWidth+'x'+v.videoHeight:'-')+" +
-            "' time:'+(v?Math.round(v.currentTime):'-')+' mirror:'+(window.__ftPipMirrorActive?1:0)+" +
-            "' pip:'+(document.documentElement.classList.contains('androidPip')?1:0)}" +
-            "catch(e){return 'err: '+e.message}})()"
-        ) { result ->
-          pipStatus.text = "waiting for frames\n${result?.trim('"') ?: "no response"}"
-          pipStatus.visibility = View.VISIBLE
-        }
-      }
-      mainHandler.postDelayed(this, 1000)
-    }
-  }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -110,82 +56,25 @@ class MainActivity: FreeTubeActivity() {
     ActivityMainBinding.inflate(layoutInflater).apply {
       setContentView(root)
       root.viewTreeObserver.addOnPreDrawListener {
-        // Check whether the initial data is ready.
         if (!state.showSplashScreen) {
-          // The content is ready. Start drawing.
           true
         } else {
-          // The content isn't ready. Suspend.
           false
         }
       }
       root.addView(webView)
-
-      // Native PiP surface: system PiP always composites native views,
-      // even when the WebView's own surface goes missing or black.
-      // A TextureView lets the frame-decoder thread draw directly via
-      // lockCanvas, skipping the (busy) UI thread for every frame.
-      pipTexture = TextureView(this@MainActivity).apply {
-        layoutParams = FrameLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        isOpaque = true
-        // Tell the page the real PiP resolution so relayed frames are
-        // exactly as sharp as the window can display. Debounced so the
-        // resize animation doesn't spam changing sizes.
-        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
-          if (isInPictureInPictureMode) {
-            mainHandler.removeCallbacks(pipSizeNotifier)
-            mainHandler.postDelayed(pipSizeNotifier, 250)
-          }
-        }
-      }
-      pipStatus = TextView(this@MainActivity).apply {
-        layoutParams = FrameLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.WRAP_CONTENT,
-          Gravity.BOTTOM
-        )
-        setTextColor(Color.WHITE)
-        textSize = 10f
-        setBackgroundColor(0x88000000.toInt())
-        setPadding(12, 6, 12, 6)
-        visibility = View.GONE
-      }
-      // ExoPlayer sink for the MediaRecorder stream. Sits under the
-      // frame-relay texture; revealed once the stream renders.
-      pipStreamTexture = TextureView(this@MainActivity).apply {
-        layoutParams = FrameLayout.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        isOpaque = true
-      }
-      pipOverlay = FrameLayout(this@MainActivity).apply {
-        layoutParams = ViewGroup.LayoutParams(
-          ViewGroup.LayoutParams.MATCH_PARENT,
-          ViewGroup.LayoutParams.MATCH_PARENT
-        )
-        setBackgroundColor(Color.BLACK)
-        visibility = View.GONE
-        isClickable = false
-        addView(pipStreamTexture)
-        addView(pipTexture)
-        addView(pipStatus)
-      }
-      root.addView(pipOverlay)
+      nativePipPlayer = NativePipPlayer(this@MainActivity)
+      nativePipPlayer.attachTo(root as ViewGroup)
     }
 
-    // this keeps android from shutting off the app to conserve battery
     startService(keepGoingService)
 
     state.darkMode = resources.configuration.isDarkMode()
 
-    // allow fullscreen shaka player to use whole window width
     window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
 
     applyPictureInPictureParams()
+    Log.d(TAG, "onCreate pipSupported=${PictureInPictureHelper.supportsPictureInPicture(this)}")
   }
 
   override fun onConfigurationChanged(newConfig: Configuration) {
@@ -195,9 +84,6 @@ class MainActivity: FreeTubeActivity() {
     webView.dispatchEvent("enabled-$colorString-mode")
   }
 
-  /**
-   * handles new intents which involve deep links (aka supported links)
-   */
   override fun onNewIntent(intent: Intent?) {
     super.onNewIntent(intent)
     val url = intent?.toYtUrl()
@@ -209,6 +95,7 @@ class MainActivity: FreeTubeActivity() {
   override fun onPause() {
     super.onPause()
     if (isInPictureInPictureMode) {
+      Log.d(TAG, "onPause ignored while in PiP")
       return
     }
     state.paused = true
@@ -227,16 +114,17 @@ class MainActivity: FreeTubeActivity() {
    */
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
+    Log.d(TAG, "onUserLeaveHint sdk=${Build.VERSION.SDK_INT} canAuto=${state.canEnterPictureInPicture}")
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      if (state.canEnterPictureInPicture) {
-        cropPlayerForPictureInPicture()
-      }
+      cropPlayerForPictureInPicture()
+      startNativePipPlayback()
       return
     }
     enterPictureInPictureModeIfPossible(requireAutoEnter = true)
   }
 
   override fun onPictureInPictureRequested(): Boolean {
+    Log.d(TAG, "onPictureInPictureRequested canAuto=${state.canEnterPictureInPicture}")
     if (state.canEnterPictureInPicture && !isInPictureInPictureMode) {
       enterPictureInPictureModeIfPossible(requireAutoEnter = true)
       return true
@@ -248,33 +136,21 @@ class MainActivity: FreeTubeActivity() {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
     state.isInPictureInPicture = isInPictureInPictureMode
     pipEnterInProgress = false
+    Log.d(TAG, "onPictureInPictureModeChanged inPip=$isInPictureInPictureMode native=${state.usingNativePip}")
     if (isInPictureInPictureMode) {
       webView.setBackgroundColor(Color.BLACK)
       cropPlayerForPictureInPicture()
+      startNativePipPlayback()
       webView.dispatchEvent("pip-enter")
-      lastPipFrameAt = 0L
-      pipStatus.text = "waiting for frames…"
-      pipStatus.visibility = View.VISIBLE
-      pipTexture.visibility = View.VISIBLE
-      pipOverlay.visibility = View.VISIBLE
-      pipOverlay.bringToFront()
-      // push the settled window size once the enter animation finishes
-      mainHandler.removeCallbacks(pipSizeNotifier)
-      mainHandler.postDelayed(pipSizeNotifier, 400)
-      mainHandler.removeCallbacks(pipCaptureClock)
-      mainHandler.post(pipCaptureClock)
-      mainHandler.removeCallbacks(pipStatusPoller)
-      mainHandler.postDelayed(pipStatusPoller, 1000)
     } else {
-      mainHandler.removeCallbacks(pipCaptureClock)
-      mainHandler.removeCallbacks(pipStatusPoller)
-      mainHandler.removeCallbacks(pipSizeNotifier)
-      stopPipStreamPlayer()
-      pipOverlay.visibility = View.GONE
-      pipStatus.visibility = View.GONE
+      val positionMs = if (state.usingNativePip) nativePipPlayer.positionMs else state.nativePipPositionMs
+      stopNativePipPlayback(resumeWebView = !state.paused)
       webView.setAndroidPipMode(false)
       webView.setBackgroundColor(Color.TRANSPARENT)
-      webView.dispatchEvent("pip-exit")
+      webView.evaluateJavascript(
+        "window.dispatchEvent(new CustomEvent('pip-exit',{detail:{positionMs:$positionMs}}));",
+        null
+      )
       if (state.paused) {
         webView.dispatchEvent("app-pause")
       }
@@ -388,8 +264,8 @@ class MainActivity: FreeTubeActivity() {
     }
     try {
       setPictureInPictureParams(currentPictureInPictureParams())
-    } catch (_: IllegalStateException) {
-      // Activity is finishing or not in a valid PiP state
+    } catch (error: IllegalStateException) {
+      Log.d(TAG, "setPictureInPictureParams ignored: ${error.message}")
     }
   }
 
@@ -399,12 +275,20 @@ class MainActivity: FreeTubeActivity() {
    */
   fun enterPictureInPictureModeIfPossible(requireAutoEnter: Boolean = false): Boolean {
     if (!PictureInPictureHelper.supportsPictureInPicture(this) || isInPictureInPictureMode || pipEnterInProgress) {
+      Log.d(TAG, "enter skipped alreadyIn=$isInPictureInPictureMode inProgress=$pipEnterInProgress")
       return isInPictureInPictureMode
     }
     if (requireAutoEnter && !state.canEnterPictureInPicture) {
+      Log.d(TAG, "enter skipped autoEnter disabled")
       return false
     }
+    if (requireAutoEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      cropPlayerForPictureInPicture()
+      startNativePipPlayback()
+      return true
+    }
     pipEnterInProgress = true
+    startNativePipPlayback()
     cropPlayerForPictureInPicture {
       webView.post {
         enterPictureInPictureNow()
@@ -413,28 +297,165 @@ class MainActivity: FreeTubeActivity() {
     return true
   }
 
+  /**
+   * @return true when play/pause was handled by the native TextureView player
+   */
+  fun handleNativePipMediaEvent(event: String): Boolean {
+    if (!state.usingNativePip) {
+      return false
+    }
+    return when (event) {
+      "media-play" -> {
+        nativePipPlayer.play()
+        state.pictureInPicturePlaying = true
+        applyPictureInPictureParams()
+        true
+      }
+      "media-pause" -> {
+        nativePipPlayer.pause()
+        state.pictureInPicturePlaying = false
+        applyPictureInPictureParams()
+        true
+      }
+      else -> false
+    }
+  }
+
+  fun onNativePipMediaUpdated() {
+    val url = state.nativePipUrl ?: return
+    val session = currentNativeSession() ?: return
+    if ((state.usingNativePip || isInPictureInPictureMode) && session.key() != nativePipPlayer.lastSessionKey) {
+      Log.d(TAG, "native media updated, restarting player")
+      nativePipPlayer.clearLastSession()
+      startNativePipPlayback()
+    } else {
+      Log.d(TAG, "native media registered url=${url.take(96)}")
+    }
+  }
+
+  fun setNativePipPoster(bitmap: Bitmap) {
+    if (!::nativePipPlayer.isInitialized) {
+      return
+    }
+    nativePipPlayer.setPosterBitmap(bitmap)
+    if (isInPictureInPictureMode || pipEnterInProgress) {
+      nativePipPlayer.showOverlay()
+    }
+  }
+
+  fun nativePipPositionMs(): Long {
+    return if (::nativePipPlayer.isInitialized && state.usingNativePip) {
+      nativePipPlayer.positionMs
+    } else {
+      state.nativePipPositionMs
+    }
+  }
+
+  private fun startNativePipPlayback() {
+    if (!state.useNativePipPlayer) {
+      Log.d(TAG, "native player disabled by setting, using WebView surface")
+      return
+    }
+    if (!::nativePipPlayer.isInitialized) {
+      return
+    }
+    nativePipPlayer.showOverlay()
+    val session = currentNativeSession()
+    if (session == null) {
+      Log.d(TAG, "no native stream yet, showing poster")
+      nativePipPlayer.showPosterOnly(state.nativePipThumbnailUrl)
+      return
+    }
+    if (nativePipPlayer.lastSessionKey == session.key()) {
+      if (state.pictureInPicturePlaying || !state.paused) {
+        nativePipPlayer.play()
+      }
+      return
+    }
+    nativePipPlayer.start(
+      session = session,
+      userAgent = webView.settings.userAgentString ?: DEFAULT_USER_AGENT,
+      playWhenReady = state.pictureInPicturePlaying || !state.paused,
+      onFirstFrame = {
+        state.usingNativePip = true
+        webView.visibility = View.INVISIBLE
+        webView.evaluateJavascript(
+          "window.__androidNativePip=true;var v=document.querySelector('video.player');if(v){v.pause();v.muted=true;}",
+          null
+        )
+        Log.d(TAG, "native first frame, WebView hidden")
+      },
+      onError = { error ->
+        Log.w(TAG, "native player failed ($error), falling back to WebView crop")
+        state.usingNativePip = false
+        nativePipPlayer.stop()
+        webView.visibility = View.VISIBLE
+        cropPlayerForPictureInPicture()
+      }
+    )
+  }
+
+  private fun stopNativePipPlayback(resumeWebView: Boolean) {
+    val positionMs = if (::nativePipPlayer.isInitialized) nativePipPlayer.positionMs else 0L
+    if (positionMs > 0) {
+      state.nativePipPositionMs = positionMs
+    }
+    if (::nativePipPlayer.isInitialized) {
+      nativePipPlayer.stop()
+    }
+    state.usingNativePip = false
+    webView.visibility = View.VISIBLE
+    webView.evaluateJavascript(
+      "window.__androidNativePip=false;var v=document.querySelector('video.player');if(v){v.muted=false;}",
+      null
+    )
+    Log.d(TAG, "stopped native player pos=$positionMs resumeWebView=$resumeWebView")
+  }
+
+  private fun currentNativeSession(): NativePipSession? {
+    val url = state.nativePipUrl ?: return null
+    if (url.isBlank()) {
+      return null
+    }
+    return NativePipSession(
+      url = url,
+      mimeType = state.nativePipMimeType,
+      audioUrl = state.nativePipAudioUrl,
+      audioMimeType = state.nativePipAudioMimeType,
+      positionMs = state.nativePipPositionMs,
+      playbackRate = state.nativePipPlaybackRate,
+      thumbnailUrl = state.nativePipThumbnailUrl,
+      preferredHeight = state.nativePipPreferredHeight
+    )
+  }
+
+  private fun currentPictureInPictureParams() = PictureInPictureHelper.buildParams(
+    this,
+    state.pictureInPictureAspectWidth,
+    state.pictureInPictureAspectHeight,
+    state.canEnterPictureInPicture,
+    state.pictureInPicturePlaying,
+    state.pictureInPictureSourceRect
+  )
+
   private fun cropPlayerForPictureInPicture(after: (() -> Unit)? = null) {
-    webView.exitHtmlFullscreen()
-    webView.setBackgroundColor(Color.BLACK)
     webView.setAndroidPipMode(true, after)
   }
 
   private fun enterPictureInPictureNow() {
-    if (isInPictureInPictureMode) {
+    if (isDestroyed || isFinishing || isInPictureInPictureMode) {
       pipEnterInProgress = false
       return
     }
     try {
-      val entered = enterPictureInPictureMode(currentPictureInPictureParams(autoEnter = false))
+      val entered = enterPictureInPictureMode(currentPictureInPictureParams())
+      Log.d(TAG, "enterPictureInPictureMode => $entered")
       if (!entered) {
         pipEnterInProgress = false
-        webView.setAndroidPipMode(false)
-        webView.setBackgroundColor(Color.TRANSPARENT)
       }
-    } catch (_: IllegalStateException) {
+    } catch (error: IllegalStateException) {
+      Log.w(TAG, "enterPictureInPictureMode failed: ${error.message}")
       pipEnterInProgress = false
-      webView.setAndroidPipMode(false)
-      webView.setBackgroundColor(Color.TRANSPARENT)
     }
   }
 
@@ -449,7 +470,6 @@ class MainActivity: FreeTubeActivity() {
     )
 
   override fun onBack() {
-    // bind the back button to the web-view history
     if (state.isInAPrompt) {
       webView.dispatchEvent("exit-prompt")
       webView.jsInterface.exitPromptMode()
@@ -463,14 +483,18 @@ class MainActivity: FreeTubeActivity() {
   }
 
   override fun onDestroy() {
-    stopPipStreamPlayer()
-    // stop the keep alive service
+    if (::nativePipPlayer.isInitialized) {
+      nativePipPlayer.release()
+    }
     stopService(keepGoingService)
-    // cancel media notification (if there is one)
     webView.jsInterface.cancelMediaNotification()
-    // clean up the web view
     webView.destroy()
-    // call `super`
     super.onDestroy()
+  }
+
+  companion object {
+    private const val TAG = "FreeTubePip"
+    private const val DEFAULT_USER_AGENT =
+      "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
   }
 }

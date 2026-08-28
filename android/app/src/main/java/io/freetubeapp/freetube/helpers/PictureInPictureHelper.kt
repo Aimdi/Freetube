@@ -9,21 +9,23 @@ import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.graphics.drawable.Icon
 import android.os.Build
+import android.util.Log
 import android.util.Rational
 import io.freetubeapp.freetube.MediaControlsReceiver
 
 /**
- * Builds Android system Picture-in-Picture params for the WebView player.
+ * Builds Android system Picture-in-Picture params.
  *
- * Android 12+ uses [PictureInPictureParams.Builder.setAutoEnterEnabled] so Home / gesture
- * leave can enter PiP before the activity is paused. Older versions use
- * [Activity.onUserLeaveHint] instead.
+ * Auto-enter (Home / gesture leave) is only available on Android 12+.
+ * Older versions use [Activity.onUserLeaveHint] instead.
  *
- * PiP shows the live activity, not a screenshot. Chrome (nav, comments, sidebar) must be
- * hidden and the video forced to fill the WebView — otherwise the floating window shows
- * the whole watch page.
+ * When the native ExoPlayer overlay is not available, PiP shows the live
+ * WebView. Chrome (nav, comments, sidebar) must be hidden and the video
+ * forced to fill the WebView — otherwise the floating window shows the
+ * whole watch page.
  */
 object PictureInPictureHelper {
+  private const val TAG = "FreeTubePip"
   private const val MAX_ASPECT_RATIO = 2.39
   private const val MIN_ASPECT_RATIO = 1.0 / 2.39
 
@@ -65,6 +67,11 @@ object PictureInPictureHelper {
       builder.setSeamlessResizeEnabled(false)
     }
 
+    Log.d(
+      TAG,
+      "params aspect=${aspectWidth}x${aspectHeight} autoEnter=$autoEnter playing=$isPlaying " +
+        "hint=$sourceHint sdk=${Build.VERSION.SDK_INT}"
+    )
     return builder.build()
   }
 
@@ -104,16 +111,6 @@ object PictureInPictureHelper {
         var style = document.createElement('style');
         style.id = 'android-pip-style';
         style.textContent = [
-          /*
-            Block hardware-overlay promotion for all videos. Overlay planes
-            are outside the window Android PiP scales (black hole) and their
-            frames cannot be read by canvas.drawImage. The tiny rotation +
-            filter force the regular composited-texture path.
-          */
-          'video {',
-          '  transform: rotateZ(0.02deg) !important;',
-          '  filter: brightness(1.001) !important;',
-          '}',
           'html.androidPip, html.androidPip body {',
           '  margin: 0 !important;',
           '  padding: 0 !important;',
@@ -124,6 +121,11 @@ object PictureInPictureHelper {
           '  min-height: 0 !important;',
           '  background: #000 !important;',
           '}',
+          'html.androidPip body * { visibility: hidden !important; }',
+          'html.androidPip .ftVideoPlayer,',
+          'html.androidPip .ftVideoPlayer *,',
+          'html.androidPip video.player,',
+          'html.androidPip video { visibility: visible !important; }',
           'html.androidPip .topNav,',
           'html.androidPip .sideNav,',
           'html.androidPip .sideNavMoreOptions,',
@@ -141,6 +143,7 @@ object PictureInPictureHelper {
           'html.androidPip .offlineMessage,',
           'html.androidPip .skippedSegmentsWrapper {',
           '  display: none !important;',
+          '  visibility: hidden !important;',
           '}',
           'html.androidPip .app,',
           'html.androidPip .flexBox,',
@@ -188,7 +191,7 @@ object PictureInPictureHelper {
           '  object-fit: contain !important;',
           '  background: #000 !important;',
           '}'
-        ].join('\n');
+        ].join('\\n');
         (document.head || document.documentElement).appendChild(style);
       }
       window.__setAndroidPip = function (on) {
@@ -202,6 +205,7 @@ object PictureInPictureHelper {
         if (player) {
           player.classList.toggle('fullWindow', !!on);
         }
+        console.info('[FreeTubePip] crop ' + (on ? 'on' : 'off'));
         return true;
       };
     })();

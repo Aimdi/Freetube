@@ -146,6 +146,8 @@ export default defineComponent({
       manifestMimeType: MANIFEST_TYPE_DASH,
       /** @type {SabrData | null} */
       sabrData: null,
+      /** @type {string|null} */
+      pipDashManifest: null,
       legacyFormats: [],
       captions: [],
       /** @type {'EQUIRECTANGULAR' | 'EQUIRECTANGULAR_THREED_TOP_BOTTOM' | 'MESH'| null} */
@@ -374,6 +376,9 @@ export default defineComponent({
       window.removeEventListener('media-seek', this.mediaSeek)
       android.cancelMediaNotification()
       android.setPictureInPictureState(false, false, 16, 9)
+      if (typeof android.setNativePipSession === 'function') {
+        android.setNativePipSession('')
+      }
       if (typeof window.__setAndroidPip === 'function') {
         window.__setAndroidPip(false)
       } else {
@@ -485,6 +490,7 @@ export default defineComponent({
       this.manifestSrc = null
       this.manifestMimeType = MANIFEST_TYPE_DASH
       this.sabrData = null
+      this.pipDashManifest = null
       this.legacyFormats = []
       this.captions = []
       this.vrProjection = null
@@ -993,6 +999,16 @@ export default defineComponent({
 
               this.manifestSrc = this.createLocalSabrManifest(result, poToken, clientInfo, storyboards)
               this.manifestMimeType = MANIFEST_TYPE_SABR
+              if (process.env.IS_ANDROID) {
+                this.createLocalDashManifest(result)
+                  .then((src) => {
+                    this.pipDashManifest = src
+                    console.info('[FreeTubePip] generated DASH manifest for native player')
+                  })
+                  .catch((error) => {
+                    console.info('[FreeTubePip] could not generate DASH for native PiP', error)
+                  })
+              }
             } else if (
               result.streaming_data.adaptive_formats[0]?.url ||
               result.streaming_data.adaptive_formats[0]?.signature_cipher ||

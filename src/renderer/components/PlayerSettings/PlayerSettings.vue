@@ -81,6 +81,14 @@
           :tooltip="t('Settings.Player Settings.Enter Picture in Picture When Leaving App Tooltip')"
           @change="updateAutoEnterPipOnLeave"
         />
+        <FtToggleSwitch
+          v-if="usingAndroid"
+          :label="t('Settings.Player Settings.Use Native Picture in Picture Player')"
+          :compact="true"
+          :default-value="useNativePipPlayer"
+          :tooltip="t('Settings.Player Settings.Use Native Picture in Picture Player Tooltip')"
+          @change="updateUseNativePipPlayer"
+        />
       </div>
     </div>
     <FtFlexBox>
@@ -402,6 +410,16 @@ const autoEnterPipOnLeave = computed(() => store.getters.getAutoEnterPipOnLeave)
  */
 function updateAutoEnterPipOnLeave(value) {
   store.dispatch('updateAutoEnterPipOnLeave', value)
+}
+
+/** @type {import('vue').ComputedRef<boolean>} */
+const useNativePipPlayer = computed(() => store.getters.getUseNativePipPlayer)
+
+/**
+ * @param {boolean} value
+ */
+function updateUseNativePipPlayer(value) {
+  store.dispatch('updateUseNativePipPlayer', value)
 }
 
 /** @type {import('vue').ComputedRef<string>} */

@@ -33,7 +33,15 @@ import {
 import { MANIFEST_TYPE_SABR } from '../../helpers/player/SabrManifestParser'
 import { setupSabrScheme } from '../../helpers/player/SabrSchemePlugin'
 import { STATE_BUFFERING, STATE_PAUSED, STATE_PLAYING, updateMediaSessionState } from '../../helpers/android/media-session'
-import { enterPictureInPicture, isInPictureInPicture, setPictureInPictureSourceRect, setPictureInPictureState } from '../../helpers/android/pip'
+import {
+  enterPictureInPicture,
+  getNativePipPositionMs,
+  isInPictureInPicture,
+  setNativePipPoster,
+  setNativePipSession,
+  setPictureInPictureSourceRect,
+  setPictureInPictureState
+} from '../../helpers/android/pip'
 import android from 'android'
 
 /** @typedef {import('../../helpers/sponsorblock').SponsorBlockCategory} SponsorBlockCategory */
@@ -87,6 +95,10 @@ export default defineComponent({
     },
     sabrData: {
       type: Object,
+      default: null
+    },
+    pipDashManifest: {
+      type: String,
       default: null
     },
     legacyFormats: {
@@ -306,6 +318,11 @@ export default defineComponent({
       return store.getters.getAutoEnterPipOnLeave
     })
 
+    /** @type {import('vue').ComputedRef<boolean>} */
+    const useNativePipPlayer = computed(() => {
+      return store.getters.getUseNativePipPlayer
+    })
+
     watch(enterFullscreenOnDisplayRotate, (newValue) => {
       ui.configure({
         enableFullscreenOnRotation: newValue
@@ -344,6 +361,78 @@ export default defineComponent({
       return { width, height }
     }
 
+    /**
+     * Picks a stream ExoPlayer can play. SABR (`sabr:` / application/sabr+json)
+     * is Shaka-only, so prefer a generated DASH MPD, then a remote DASH/HLS
+     * manifest, then a muxed progressive URL.
+     * @returns {{ url: string, mimeType: string } | null}
+     */
+    function getNativePipMedia() {
+      if (props.format === 'legacy' && activeLegacyFormat.value?.url) {
+        return {
+          url: activeLegacyFormat.value.url,
+          mimeType: activeLegacyFormat.value.mimeType || 'video/mp4'
+        }
+      }
+
+      if (props.pipDashManifest) {
+        return {
+          url: props.pipDashManifest,
+          mimeType: 'application/dash+xml'
+        }
+      }
+
+      const manifest = props.manifestSrc
+      if (manifest && props.manifestMimeType !== MANIFEST_TYPE_SABR) {
+        if (manifest.startsWith('http') || manifest.startsWith('data:application/dash')) {
+          return {
+            url: manifest,
+            mimeType: props.manifestMimeType || 'application/dash+xml'
+          }
+        }
+      }
+
+      const formats = (props.legacyFormats || [])
+        .filter(format => format.url)
+        .slice()
+        .sort((a, b) => (b.height || 0) - (a.height || 0))
+
+      if (formats[0]) {
+        return {
+          url: formats[0].url,
+          mimeType: formats[0].mimeType || 'video/mp4'
+        }
+      }
+
+      return null
+    }
+
+    function reportAndroidPipSourceRect() {
+      const videoEl = video.value
+      if (!videoEl) {
+        return
+      }
+      const rect = videoEl.getBoundingClientRect()
+      setPictureInPictureSourceRect(rect.left, rect.top, rect.width, rect.height)
+    }
+
+    function captureAndroidPipPoster() {
+      const videoEl = video.value
+      if (!videoEl || videoEl.videoWidth === 0) {
+        return
+      }
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.min(videoEl.videoWidth, 640)
+        canvas.height = Math.round(canvas.width * (videoEl.videoHeight / videoEl.videoWidth))
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height)
+        setNativePipPoster(canvas.toDataURL('image/jpeg', 0.7))
+      } catch (error) {
+        console.info('[FreeTubePip] poster capture failed', error)
+      }
+    }
+
     function syncAndroidPipState() {
       if (!process.env.IS_ANDROID) {
         return
@@ -351,483 +440,39 @@ export default defineComponent({
 
       const videoEl = video.value
       const { width, height } = getAndroidPipAspectRatio()
-      const isPlaying = !!(videoEl && !videoEl.paused && !videoEl.ended)
+      const isPlaying = !!(window.__androidNativePip) || !!(videoEl && !videoEl.paused && !videoEl.ended)
       const canAutoEnter = isPlaying && props.format !== 'audio' && autoEnterPipOnLeave.value
 
       setPictureInPictureState(canAutoEnter, isPlaying, width, height)
+      reportAndroidPipSourceRect()
 
-      const boxEl = container.value || videoEl
-      if (boxEl) {
-        const box = boxEl.getBoundingClientRect()
-        if (box.width >= 8 && box.height >= 8) {
-          setPictureInPictureSourceRect(box.left, box.top, box.width, box.height)
-        }
+      if (props.format === 'audio') {
+        setNativePipSession(null)
+        return
       }
+
+      const media = getNativePipMedia()
+      setNativePipSession({
+        url: media?.url || '',
+        mimeType: media?.mimeType || '',
+        positionMs: Math.floor((videoEl?.currentTime || 0) * 1000),
+        playbackRate: videoEl?.playbackRate || 1,
+        thumbnailUrl: props.thumbnail || '',
+        preferredHeight: height,
+        useNative: !!(useNativePipPlayer.value && media?.url)
+      })
     }
 
-    // #region android pip canvas mirror
-
-    /*
-      Android system PiP scales the activity window, but Chromium decodes
-      <video> onto a hardware overlay that is not part of that window —
-      the PiP surface shows a black hole where the video is. A 2D canvas
-      *is* a normal compositor texture, so mirroring the frames onto a
-      canvas makes them visible in PiP. Drawing a cross-origin video into
-      a canvas is allowed (only pixel readback taints), and works for
-      every format: legacy, DASH, HLS and SABR.
-    */
-    /** @type {HTMLCanvasElement|null} */
-    let pipMirrorCanvas = null
-    /** @type {(() => void)|null} */
-    let pipMirrorStop = null
-
-    /*
-      Lip-sync compensation: the PiP picture arrives ~100ms late
-      (capture + encode + bridge + decode + draw) while audio plays
-      instantly. Routing the element's audio through a DelayNode and
-      matching the measured frame latency brings lips back in sync.
-      Delay is 0 outside PiP. MediaElementSource has the same CORS
-      requirements as the canvas relay, which is already working.
-    */
-    /** @type {AudioContext|null} */
-    let pipAudioContext = null
-    /** @type {DelayNode|null} */
-    let pipAudioDelay = null
-    /** @type {MediaElementAudioSourceNode|null} */
-    let pipAudioSourceNode = null
-    /** @type {GainNode|null} */
-    let pipAudioGain = null
-    // True end-to-end latency (capture -> drawn on the native surface),
-    // measured through per-frame acks from the native side.
-    let pipFrameLatencyMs = 120
-
-    async function enableAndroidPipAudioSync() {
-      const videoEl = video.value
-      if (!videoEl) {
+    function setWebViewAbrEnabled(enabled) {
+      if (!player) {
         return
       }
       try {
-        if (!pipAudioContext) {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)()
-          await ctx.resume()
-          if (ctx.state !== 'running') {
-            await ctx.close()
-            return
-          }
-          const delayNode = ctx.createDelay(1.0)
-          delayNode.delayTime.value = 0
-          const gainNode = ctx.createGain()
-          gainNode.gain.value = 1
-          const source = ctx.createMediaElementSource(videoEl)
-          source.connect(delayNode)
-          delayNode.connect(gainNode)
-          gainNode.connect(ctx.destination)
-          pipAudioContext = ctx
-          pipAudioDelay = delayNode
-          pipAudioSourceNode = source
-          pipAudioGain = gainNode
-        }
-        updateAndroidPipAudioDelay()
-      } catch {
-        // audio keeps playing directly; sync stays as-is
+        player.configure({ abr: { enabled } })
+        console.info('[FreeTubePip] ABR', enabled ? 'enabled' : 'locked')
+      } catch (error) {
+        console.info('[FreeTubePip] ABR configure failed', error)
       }
-    }
-
-    /**
-     * Mutes the speaker route while native stream playback carries the
-     * audio, without muting the element (that would silence the capture).
-     * @param {boolean} muted
-     */
-    function setPipSpeakersMuted(muted) {
-      if (pipAudioContext && pipAudioGain) {
-        try {
-          pipAudioGain.gain.setTargetAtTime(muted ? 0 : 1, pipAudioContext.currentTime, 0.03)
-        } catch {
-          // keep current routing
-        }
-      }
-    }
-
-    function updateAndroidPipAudioDelay() {
-      if (!pipAudioContext || !pipAudioDelay) {
-        return
-      }
-      // measured end-to-end latency + display/vsync margin
-      const target = Math.min(0.4, Math.max(0.05, (pipFrameLatencyMs + 20) / 1000))
-      try {
-        pipAudioDelay.delayTime.setTargetAtTime(target, pipAudioContext.currentTime, 0.1)
-      } catch {
-        // keep previous delay
-      }
-    }
-
-    function disableAndroidPipAudioSync() {
-      if (pipAudioContext && pipAudioDelay) {
-        try {
-          pipAudioDelay.delayTime.setTargetAtTime(0, pipAudioContext.currentTime, 0.05)
-        } catch {
-          // keep previous delay
-        }
-      }
-    }
-
-    function closeAndroidPipAudioSync() {
-      if (pipAudioContext) {
-        try {
-          pipAudioContext.close()
-        } catch {
-          // already closed
-        }
-        pipAudioContext = null
-        pipAudioDelay = null
-        pipAudioSourceNode = null
-        pipAudioGain = null
-      }
-    }
-
-    // #region android pip media stream
-
-    /*
-      Preferred PiP path: hardware-encode the playing audio+video with
-      MediaRecorder and hand the container stream to a native ExoPlayer.
-      Real video pipeline on both ends: smooth frame pacing and perfect
-      A/V sync from container timestamps. Runs ~0.5-1s behind live,
-      which is invisible inside a PiP window. The JPEG frame relay keeps
-      covering the window until the stream renders, and remains the
-      fallback if recording is unsupported or fails.
-    */
-    /** @type {MediaRecorder|null} */
-    let pipStreamRecorder = null
-    /** @type {MediaStreamAudioDestinationNode|null} */
-    let pipStreamAudioDest = null
-
-    function startAndroidPipStream() {
-      if (
-        pipStreamRecorder ||
-        props.format === 'audio' ||
-        typeof MediaRecorder === 'undefined' ||
-        typeof android.sendPipStreamStart !== 'function' ||
-        // audio must come through the Web Audio graph, otherwise the
-        // speakers and the native player would both play sound
-        !pipAudioContext || !pipAudioSourceNode
-      ) {
-        return
-      }
-      const videoEl = video.value
-      if (!videoEl || typeof videoEl.captureStream !== 'function') {
-        return
-      }
-      try {
-        const captured = videoEl.captureStream()
-        const videoTrack = captured.getVideoTracks()[0]
-        if (!videoTrack) {
-          return
-        }
-        const tracks = [videoTrack]
-        const audioDest = pipAudioContext.createMediaStreamDestination()
-        pipAudioSourceNode.connect(audioDest)
-        pipStreamAudioDest = audioDest
-        const audioTrack = audioDest.stream.getAudioTracks()[0]
-        if (audioTrack) {
-          tracks.push(audioTrack)
-        }
-
-        const mimeType = [
-          'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
-          'video/webm;codecs=vp8,opus',
-          'video/webm'
-        ].find(type => MediaRecorder.isTypeSupported(type))
-        if (!mimeType) {
-          stopAndroidPipStream()
-          return
-        }
-
-        const recorder = new MediaRecorder(new MediaStream(tracks), {
-          mimeType,
-          videoBitsPerSecond: 2_500_000,
-          audioBitsPerSecond: 128_000
-        })
-
-        // chunks must reach the native demuxer in order
-        let chunkChain = Promise.resolve()
-        recorder.ondataavailable = (event) => {
-          if (!event.data || event.data.size === 0 || pipStreamRecorder !== recorder) {
-            return
-          }
-          chunkChain = chunkChain
-            .then(() => event.data.arrayBuffer())
-            .then((arrayBuffer) => {
-              if (pipStreamRecorder !== recorder) {
-                return
-              }
-              const bytes = new Uint8Array(arrayBuffer)
-              let binary = ''
-              for (let i = 0; i < bytes.length; i += 0x8000) {
-                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
-              }
-              android.sendPipStreamChunk(btoa(binary))
-            })
-            .catch(() => {
-              stopAndroidPipStream()
-            })
-        }
-        recorder.onerror = () => {
-          stopAndroidPipStream()
-        }
-
-        android.sendPipStreamStart(mimeType)
-        recorder.start(250)
-        pipStreamRecorder = recorder
-      } catch {
-        stopAndroidPipStream()
-      }
-    }
-
-    function stopAndroidPipStream() {
-      const recorder = pipStreamRecorder
-      pipStreamRecorder = null
-      if (recorder) {
-        try {
-          recorder.stop()
-        } catch {
-          // already stopped
-        }
-      }
-      if (pipStreamAudioDest && pipAudioSourceNode) {
-        try {
-          pipAudioSourceNode.disconnect(pipStreamAudioDest)
-        } catch {
-          // already disconnected
-        }
-      }
-      pipStreamAudioDest = null
-      if (typeof android.sendPipStreamEnd === 'function') {
-        try {
-          android.sendPipStreamEnd()
-        } catch {
-          // native side already closed
-        }
-      }
-    }
-
-    function handlePipStreamRendering() {
-      // native player has the picture and the audio: silence the
-      // speaker route and stop the JPEG relay
-      setPipSpeakersMuted(true)
-      disableAndroidPipAudioSync()
-      stopAndroidPipMirror()
-    }
-
-    function handlePipStreamFailed() {
-      stopAndroidPipStream()
-      setPipSpeakersMuted(false)
-      startAndroidPipMirror()
-      enableAndroidPipAudioSync()
-    }
-
-    // #endregion android pip media stream
-
-    function startAndroidPipMirror() {
-      const videoEl = video.value
-      const containerEl = container.value
-      if (!videoEl || !containerEl || pipMirrorCanvas) {
-        return
-      }
-
-      const canvas = document.createElement('canvas')
-      canvas.id = 'ftAndroidPipCanvas'
-      canvas.style.cssText =
-        'position:absolute;inset:0;width:100%;height:100%;z-index:2147483647;' +
-        'background:#000;object-fit:contain;display:block;pointer-events:none;'
-      const ctx = canvas.getContext('2d')
-      containerEl.appendChild(canvas)
-      pipMirrorCanvas = canvas
-
-      let stopped = false
-      let vfcHandle = null
-      let relayBusy = false
-      let lastCaptureTime = 0
-      let ackCount = 0
-      // Closed-loop controller state: starts conservative and adapts to
-      // whatever this device can actually sustain.
-      let relayQuality = 0.5
-      let relayResolutionScale = 0.8
-
-      const supportsVfc = typeof videoEl.requestVideoFrameCallback === 'function'
-      const canRelayFrames = typeof android.sendPipFrame === 'function'
-
-      window.__ftPipMirrorActive = true
-
-      /*
-        Per-frame ack from the native side after the frame is actually
-        drawn. Gives the TRUE end-to-end latency, which drives both the
-        audio delay line and the quality/resolution controller:
-        overloaded -> smaller/cheaper frames; headroom -> sharper frames.
-      */
-      window.__ftPipFrameShown = (sentAt) => {
-        if (stopped || typeof sentAt !== 'number') {
-          return
-        }
-        const sample = performance.now() - sentAt
-        if (sample <= 0 || sample > 2000) {
-          return
-        }
-        pipFrameLatencyMs = pipFrameLatencyMs * 0.8 + sample * 0.2
-        ackCount++
-        if (ackCount % 15 === 0) {
-          if (pipFrameLatencyMs > 110) {
-            relayQuality = Math.max(0.4, relayQuality - 0.05)
-            relayResolutionScale = Math.max(0.6, relayResolutionScale - 0.1)
-          } else if (pipFrameLatencyMs < 60) {
-            relayQuality = Math.min(0.7, relayQuality + 0.05)
-            relayResolutionScale = Math.min(1, relayResolutionScale + 0.05)
-          }
-          updateAndroidPipAudioDelay()
-        }
-      }
-
-      const paintFrame = () => {
-        const videoWidth = videoEl.videoWidth
-        const videoHeight = videoEl.videoHeight
-        if (videoWidth <= 0 || videoHeight <= 0) {
-          return
-        }
-        // Pace to ~30fps regardless of which clock fired
-        const now = performance.now()
-        if (now - lastCaptureTime < 30) {
-          return
-        }
-        lastCaptureTime = now
-
-        // Base target: the PiP window's real width (pushed by the native
-        // side), scaled down by the controller when the device is slow.
-        const windowWidth = Math.min(600, Math.max(320, window.__ftPipTargetWidth || 480))
-        const targetWidth = Math.max(280, Math.round(windowWidth * relayResolutionScale))
-        const scale = Math.min(1, targetWidth / videoWidth)
-        const canvasWidth = Math.max(1, Math.round(videoWidth * scale))
-        const canvasHeight = Math.max(1, Math.round(videoHeight * scale))
-        if (canvas.width !== canvasWidth || canvas.height !== canvasHeight) {
-          canvas.width = canvasWidth
-          canvas.height = canvasHeight
-        }
-        try {
-          ctx.drawImage(videoEl, 0, 0, canvasWidth, canvasHeight)
-        } catch {
-          // ignore decoder hiccups; next frame will draw
-          return
-        }
-
-        /*
-          Relay the frame to the native TextureView. The WebView's own
-          surface is not composited into the PiP window on all devices,
-          but native views always are.
-
-          toBlob encodes asynchronously off the main thread. Strictly one
-          frame in flight — when encoding can't keep up, frames are
-          dropped, never queued, so the PiP image stays in real time.
-          MSE-fed video never taints the canvas and the legacy <video>
-          uses crossorigin="anonymous".
-        */
-        if (canRelayFrames && !relayBusy) {
-          relayBusy = true
-          const captureStart = performance.now()
-          try {
-            canvas.toBlob((blob) => {
-              if (!blob || stopped) {
-                relayBusy = false
-                return
-              }
-              const reader = new FileReader()
-              reader.onloadend = () => {
-                relayBusy = false
-                if (!stopped && typeof reader.result === 'string') {
-                  try {
-                    android.sendPipFrame(reader.result, captureStart)
-                  } catch {
-                    // bridge hiccup; next frame will arrive shortly
-                  }
-                }
-              }
-              reader.onerror = () => {
-                relayBusy = false
-              }
-              reader.readAsDataURL(blob)
-            }, 'image/jpeg', relayQuality)
-          } catch {
-            // tainted canvas; the in-page mirror keeps running
-            relayBusy = false
-          }
-        }
-      }
-
-      const vfcLoop = () => {
-        if (stopped) {
-          return
-        }
-        paintFrame()
-        vfcHandle = videoEl.requestVideoFrameCallback(vfcLoop)
-      }
-
-      /*
-        Capture clocks, most reliable first:
-        1. The native activity ticks window.__ftPipCapture every 33ms via
-           evaluateJavascript — immune to the renderer's background timer
-           throttling while the activity is paused in PiP.
-        2. An in-page interval as fallback (throttled on some devices).
-        3. requestVideoFrameCallback adds frame-exact precision when the
-           compositor still services it.
-        The 30ms minimum gap in paintFrame coalesces all three.
-      */
-      window.__ftPipCapture = () => {
-        if (!stopped) {
-          paintFrame()
-        }
-      }
-
-      const captureInterval = setInterval(() => {
-        if (!stopped) {
-          paintFrame()
-        }
-      }, 33)
-
-      if (supportsVfc) {
-        vfcLoop()
-      } else {
-        paintFrame()
-      }
-
-      pipMirrorStop = () => {
-        stopped = true
-        window.__ftPipMirrorActive = false
-        delete window.__ftPipCapture
-        delete window.__ftPipFrameShown
-        clearInterval(captureInterval)
-        if (vfcHandle !== null && typeof videoEl.cancelVideoFrameCallback === 'function') {
-          videoEl.cancelVideoFrameCallback(vfcHandle)
-        }
-      }
-    }
-
-    function stopAndroidPipMirror() {
-      if (pipMirrorStop) {
-        pipMirrorStop()
-        pipMirrorStop = null
-      }
-      if (pipMirrorCanvas) {
-        pipMirrorCanvas.remove()
-        pipMirrorCanvas = null
-      }
-    }
-
-    // #endregion android pip canvas mirror
-
-    function setAndroidPipLayout(enabled) {
-      if (typeof window.__setAndroidPip === 'function') {
-        window.__setAndroidPip(enabled)
-        return
-      }
-      document.documentElement.classList.toggle('androidPip', enabled)
-      document.body.classList.toggle('androidPip', enabled)
     }
 
     function enterAndroidPictureInPicture() {
@@ -841,9 +486,17 @@ export default defineComponent({
         // pass
       }
 
-      setAndroidPipLayout(true)
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(true)
+      } else {
+        document.body.classList.add('androidPip')
+        document.documentElement.classList.add('androidPip')
+      }
+      captureAndroidPipPoster()
       syncAndroidPipState()
-      beginAndroidPipSession()
+      if (!useNativePipPlayer.value || !getNativePipMedia()) {
+        setWebViewAbrEnabled(false)
+      }
       enterPictureInPicture()
     }
 
@@ -865,24 +518,56 @@ export default defineComponent({
     }
 
     function handleAndroidPipEnter() {
-      setAndroidPipLayout(true)
-      beginAndroidPipSession()
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(true)
+      } else {
+        document.body.classList.add('androidPip')
+        document.documentElement.classList.add('androidPip')
+      }
       try {
         document.exitFullscreen()
       } catch {
         // pass
       }
+      captureAndroidPipPoster()
+      syncAndroidPipState()
+      if (!window.__androidNativePip) {
+        setWebViewAbrEnabled(false)
+      }
+      console.info('[FreeTubePip] pip-enter native=', !!window.__androidNativePip)
     }
 
-    function handleAndroidPipExit() {
-      endAndroidPipSession()
-      setAndroidPipLayout(false)
+    /**
+     * @param {CustomEvent} [event]
+     */
+    function handleAndroidPipExit(event) {
+      if (typeof window.__setAndroidPip === 'function') {
+        window.__setAndroidPip(false)
+      } else {
+        document.body.classList.remove('androidPip')
+        document.documentElement.classList.remove('androidPip')
+      }
+      setWebViewAbrEnabled(true)
+
+      const videoEl = video.value
+      const nativePositionMs = event?.detail?.positionMs || getNativePipPositionMs()
+      if (videoEl && nativePositionMs > 0) {
+        const seconds = nativePositionMs / 1000
+        if (Math.abs((videoEl.currentTime || 0) - seconds) > 0.4) {
+          videoEl.currentTime = seconds
+        }
+        console.info('[FreeTubePip] pip-exit seek', seconds)
+      }
+      if (videoEl) {
+        videoEl.muted = false
+      }
+      syncAndroidPipState()
     }
 
     if (process.env.IS_ANDROID) {
       window.addEventListener('pip-enter', handleAndroidPipEnter)
       window.addEventListener('pip-exit', handleAndroidPipExit)
-      watch([autoEnterPipOnLeave, () => props.format], () => {
+      watch([autoEnterPipOnLeave, useNativePipPlayer, () => props.format, () => props.pipDashManifest], () => {
         syncAndroidPipState()
       })
     }
@@ -3365,9 +3050,15 @@ export default defineComponent({
     const initLoadWaitTimeToastAC = new AbortController()
 
     const mediaPlay = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.play()
     }
     const mediaPause = () => {
+      if (window.__androidNativePip) {
+        return
+      }
       video.value.pause()
     }
     let updateBufferInterval = null
@@ -3392,37 +3083,38 @@ export default defineComponent({
           syncAndroidPipState()
         })
         videoElement.addEventListener('pause', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           android.disableKeepScreenOn()
           updateMediaSessionState(STATE_PAUSED)
           syncAndroidPipState()
         })
         videoElement.addEventListener('ended', () => {
+          if (window.__androidNativePip) {
+            return
+          }
           syncAndroidPipState()
         })
         videoElement.addEventListener('loadedmetadata', () => {
           syncAndroidPipState()
         })
-        // `timeupdate` can fire dozens of times per second and every media
-        // session update crosses the JS <-> native bridge (recreating the
-        // notification on Android < 13). Pushing the position ~once per second
-        // is plenty for the scrubber and avoids the playback jank that was most
-        // noticeable in Picture-in-Picture. The native side reports a playback
-        // speed of 1.0 while playing, so Android interpolates the position
-        // smoothly between these updates.
-        let lastMediaSessionPositionUpdate = 0
-        videoElement.addEventListener('timeupdate', () => {
-          const now = performance.now()
-          if (now - lastMediaSessionPositionUpdate < 1000) {
+        const pushMediaPosition = throttle(() => {
+          if (window.__androidNativePip) {
             return
           }
-          lastMediaSessionPositionUpdate = now
-          updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
-        })
-        // A 0ms interval is effectively a busy loop that churns the main thread
-        // for the entire session; poll for the buffering state once per second.
+          updateMediaSessionState(
+            videoElement.paused ? STATE_PAUSED : STATE_PLAYING,
+            Math.floor(videoElement.currentTime * 1000)
+          )
+        }, 1000)
+        videoElement.addEventListener('timeupdate', pushMediaPosition)
         updateBufferInterval = setInterval(() => {
+          if (window.__androidNativePip) {
+            return
+          }
           if (videoElement.buffered.length === 0) {
-            updateMediaSessionState(videoElement.paused ? STATE_PAUSED : STATE_BUFFERING, Math.floor(videoElement.currentTime * 1000))
+            updateMediaSessionState(videoElement.paused ? STATE_BUFFERING : STATE_PLAYING, Math.floor(videoElement.currentTime * 1000))
           }
         }, 1000)
       }
@@ -3956,6 +3648,7 @@ export default defineComponent({
         endAndroidPipSession()
         closeAndroidPipAudioSync()
         setPictureInPictureState(false, false, 16, 9)
+        setNativePipSession(null)
       }
     })
 

@@ -8,7 +8,7 @@ import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-import android.webkit.WebChromeClient.CustomViewCallback
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -43,6 +43,7 @@ class FreeTubeWebView (
     spoofDesktopUserAgent()
     layoutParams = LayoutParams(MATCH_PARENT, MATCH_PARENT)
     setBackgroundColor(Color.TRANSPARENT)
+    setLayerType(LAYER_TYPE_HARDWARE, null)
 
     @SuppressLint("SetJavaScriptEnabled")
     settings.javaScriptEnabled = true
@@ -85,7 +86,7 @@ class FreeTubeWebView (
     }
 
     var fullscreenView: View? = null
-    var fullscreenCallback: CustomViewCallback? = null
+    var fullscreenCallback: WebChromeClient.CustomViewCallback? = null
     webChromeClient = object: ConsoleLogChromeClient({ message ->
       onConsoleMessage(message)
     }) {
@@ -130,17 +131,11 @@ class FreeTubeWebView (
   }
 
   fun setAndroidPipMode(enabled: Boolean, after: (() -> Unit)? = null) {
-    // Install (or refresh) the unscoped crop CSS and toggle it in one
-    // evaluateJavascript so the class is never applied without the stylesheet.
     val script = PictureInPictureHelper.INSTALL_SCRIPT +
       ";window.__setAndroidPip && window.__setAndroidPip($enabled);"
     evaluateJavascript(script) {
       after?.invoke()
     }
-  }
-
-  fun exitHtmlFullscreen() {
-    webChromeClient?.onHideCustomView()
   }
 
   fun generateBgWebview(): BotGuardWebView {

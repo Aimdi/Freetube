@@ -22,6 +22,7 @@
           :manifest-src="manifestSrc"
           :manifest-mime-type="manifestMimeType"
           :sabr-data="sabrData"
+          :pip-dash-manifest="pipDashManifest"
           :legacy-formats="legacyFormats"
           :start-time="startTimeSeconds"
           :captions="captions"
