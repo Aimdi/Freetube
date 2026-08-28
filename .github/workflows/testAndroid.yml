@@ -36,7 +36,7 @@ jobs:
 
     - name: 📚Read package.json
       id: pkg
-      uses: jaywcjlove/github-action-package@v1.3.0
+      uses: jaywcjlove/github-action-package@v2.1.0
 
     - name: Set Version Number Variable
       id: versionNumber
