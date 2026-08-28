@@ -8,6 +8,7 @@ import android.os.Build
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.webkit.WebChromeClient.CustomViewCallback
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -15,6 +16,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import io.freetubeapp.freetube.R
 import io.freetubeapp.freetube.activities.FreeTubeActivity
+import io.freetubeapp.freetube.helpers.PictureInPictureHelper
 import io.freetubeapp.freetube.helpers.WindowInsetsControllerWrapper
 import io.freetubeapp.freetube.helpers.spoofDesktopUserAgent
 import io.freetubeapp.freetube.javascript.FreeTubeJavaScriptInterface
@@ -58,6 +60,7 @@ class FreeTubeWebView (
     webViewClient = object: WebViewClient() {
       override fun onPageFinished(view: WebView?, url: String?) {
         context.state.currentPage = url
+        injectAndroidPipSupport()
         super.onPageFinished(view, url)
       }
       override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
@@ -82,6 +85,7 @@ class FreeTubeWebView (
     }
 
     var fullscreenView: View? = null
+    var fullscreenCallback: CustomViewCallback? = null
     webChromeClient = object: ConsoleLogChromeClient({ message ->
       onConsoleMessage(message)
     }) {
@@ -97,11 +101,15 @@ class FreeTubeWebView (
 
           viewGroup.addView(view)
           fullscreenView = view
+          fullscreenCallback = callback
           dispatchEvent("start-fullscreen")
         }
       }
 
       override fun onHideCustomView() {
+        if (fullscreenView == null) {
+          return
+        }
         val viewGroup = (parent as ViewGroup)
 
         // show system ui
@@ -109,9 +117,30 @@ class FreeTubeWebView (
         windowInsetsControllerWrapper.show(WindowInsetsCompat.Type.systemBars())
 
         viewGroup.removeView(fullscreenView)
+        fullscreenView = null
+        fullscreenCallback?.onCustomViewHidden()
+        fullscreenCallback = null
         dispatchEvent("end-fullscreen")
       }
     }
+  }
+
+  fun injectAndroidPipSupport() {
+    evaluateJavascript(PictureInPictureHelper.INSTALL_SCRIPT, null)
+  }
+
+  fun setAndroidPipMode(enabled: Boolean, after: (() -> Unit)? = null) {
+    // Install (or refresh) the unscoped crop CSS and toggle it in one
+    // evaluateJavascript so the class is never applied without the stylesheet.
+    val script = PictureInPictureHelper.INSTALL_SCRIPT +
+      ";window.__setAndroidPip && window.__setAndroidPip($enabled);"
+    evaluateJavascript(script) {
+      after?.invoke()
+    }
+  }
+
+  fun exitHtmlFullscreen() {
+    webChromeClient?.onHideCustomView()
   }
 
   fun generateBgWebview(): BotGuardWebView {
