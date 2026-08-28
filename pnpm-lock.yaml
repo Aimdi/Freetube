@@ -151,8 +151,8 @@ importers:
         specifier: ^5.6.8
         version: 5.6.8(webpack@5.109.2)
       js-yaml:
-        specifier: ^5.2.3
-        version: 5.2.3
+        specifier: ^5.4.0
+        version: 5.4.0
       json-minimizer-webpack-plugin:
         specifier: ^5.0.1
         version: 5.0.1(webpack@5.109.2)
@@ -203,7 +203,7 @@ importers:
         version: 5.109.2(clean-css@5.3.3)(cssnano@7.0.6(postcss@8.5.26))(csso@5.0.5)(html-minifier-terser@6.1.0)(postcss@8.5.26)(webpack-cli@7.2.2)
       webpack-cli:
         specifier: ^7.2.2
-        version: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+        version: 7.2.2(js-yaml@5.4.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
       webpack-dev-server:
         specifier: ^6.0.0
         version: 6.0.0(supports-color@10.2.2)(tslib@2.8.1)(webpack-cli@7.2.2)(webpack@5.109.2)
@@ -3354,8 +3354,8 @@ packages:
     resolution: {integrity: sha512-CY6crGq313MX8GkwvB7tzgp99vjQxY1++5y10/BKN/GUfHqWaOGQMNZkBvqSzsZKWk/ijwHlWzzkLulsGHhjWQ==}
     hasBin: true
 
-  js-yaml@5.2.3:
-    resolution: {integrity: sha512-n+mUVyUX5bVv7G/G2zyIHOhdxfuU1dY2NOFzTQUWiMUbFss8b57NFlgCCaggU78wSw5KVS9cllzeLyzyR+n5nw==}
+  js-yaml@5.4.0:
+    resolution: {integrity: sha512-jE7vUJIebKzYQI5xu4co5CRBDlDEYnHrdzsxs4O2giCz4v2SbVMYKpmt1D9L38OKQAeCWmrOTRiCV93u0UkaJA==}
     hasBin: true
 
   jsdoc-type-pratt-parser@8.0.0:
@@ -8742,7 +8742,7 @@ snapshots:
     dependencies:
       argparse: 2.0.1
 
-  js-yaml@5.2.3:
+  js-yaml@5.4.0:
     dependencies:
       argparse: 2.0.1
 
@@ -10402,7 +10402,7 @@ snapshots:
       asn1js: 3.0.10
       tslib: 2.8.1
 
-  webpack-cli@7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2):
+  webpack-cli@7.2.2(js-yaml@5.4.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2):
     dependencies:
       '@discoveryjs/json-ext': 1.1.0
       commander: 14.0.3
@@ -10414,7 +10414,7 @@ snapshots:
       webpack: 5.109.2(clean-css@5.3.3)(cssnano@7.0.6(postcss@8.5.26))(csso@5.0.5)(html-minifier-terser@6.1.0)(postcss@8.5.26)(webpack-cli@7.2.2)
       webpack-merge: 6.0.1
     optionalDependencies:
-      js-yaml: 5.2.3
+      js-yaml: 5.4.0
       json5: 2.2.3
       webpack-dev-server: 6.0.0(supports-color@10.2.2)(tslib@2.8.1)(webpack-cli@7.2.2)(webpack@5.109.2)
 
@@ -10459,7 +10459,7 @@ snapshots:
       ws: 8.21.0
     optionalDependencies:
       webpack: 5.109.2(clean-css@5.3.3)(cssnano@7.0.6(postcss@8.5.26))(csso@5.0.5)(html-minifier-terser@6.1.0)(postcss@8.5.26)(webpack-cli@7.2.2)
-      webpack-cli: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+      webpack-cli: 7.2.2(js-yaml@5.4.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -10499,7 +10499,7 @@ snapshots:
       watchpack: 2.5.2
       webpack-sources: 3.5.1
     optionalDependencies:
-      webpack-cli: 7.2.2(js-yaml@5.2.3)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
+      webpack-cli: 7.2.2(js-yaml@5.4.0)(json5@2.2.3)(webpack-dev-server@6.0.0)(webpack@5.109.2)
     transitivePeerDependencies:
       - '@minify-html/node'
       - '@swc/core'
