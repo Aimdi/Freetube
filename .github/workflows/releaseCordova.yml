@@ -56,21 +56,21 @@ jobs:
           return '${{ steps.pkg.outputs.name }}'
 
     - name: ⬆ Update package.json version
-      uses: jossef/action-set-json-field@v2.1
+      uses: jossef/action-set-json-field@v2.2
       with:
         file: package.json
         field: version
         value: ${{ steps.versionNumber.outputs.result }}
 
     - name: ⬆ Update package.json app environment
-      uses: jossef/action-set-json-field@v2.1
+      uses: jossef/action-set-json-field@v2.2
       with:
         file: package.json
         field: name
         value: ${{ steps.appId.outputs.result }}
 
     - name: ⬆ Update package.json product name
-      uses: jossef/action-set-json-field@v2.1
+      uses: jossef/action-set-json-field@v2.2
       with:
         file: package.json
         field: productName
